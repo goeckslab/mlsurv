@@ -1,0 +1,17 @@
+dataset,n_estimators,level,median_s,overhead_pct,all_times
+GBSG2,100,1. Raw sksurv fit,0.2691,0.0,0.2691;0.2850;0.2647
+GBSG2,100,2. mlsurv wrapper fit,0.2624,-2.52,0.2624;0.2599;0.2663
+GBSG2,100,3. Pipeline fit,0.2703,0.42,0.2703;0.2644;0.2713
+GBSG2,100,4. Tuning trial (3-fold CV),0.4294,59.54,0.4301;0.4241;0.4294
+GBSG2,500,1. Raw sksurv fit,1.3372,0.0,1.3454;1.3180;1.3372
+GBSG2,500,2. mlsurv wrapper fit,1.4642,9.49,1.4642;1.4772;1.4481
+GBSG2,500,3. Pipeline fit,1.3744,2.78,1.3744;1.3805;1.3564
+GBSG2,500,4. Tuning trial (3-fold CV),2.1045,57.38,2.1302;2.1045;2.0933
+Synthetic,100,1. Raw sksurv fit,0.1221,0.0,0.1221;0.1272;0.1183
+Synthetic,100,2. mlsurv wrapper fit,0.123,0.78,0.1259;0.1189;0.1230
+Synthetic,100,3. Pipeline fit,0.1221,-0.03,0.1193;0.1264;0.1221
+Synthetic,100,4. Tuning trial (3-fold CV),0.2514,105.89,0.2632;0.2514;0.2416
+Synthetic,500,1. Raw sksurv fit,0.6125,0.0,0.6125;0.6115;0.6169
+Synthetic,500,2. mlsurv wrapper fit,0.6095,-0.48,0.6299;0.6010;0.6095
+Synthetic,500,3. Pipeline fit,0.603,-1.55,0.6215;0.6030;0.5885
+Synthetic,500,4. Tuning trial (3-fold CV),1.217,98.69,1.2308;1.2149;1.2170

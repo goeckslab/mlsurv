@@ -1,0 +1,139 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mlsurv"
+version = "0.1.0"
+description = "Low-code machine learning package for survival analysis"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [
+    {name = "Alyssa Pybus", email = "alyssa.pybus@moffitt.org"}
+]
+requires-python = ">=3.11"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+    "Topic :: Scientific/Engineering :: Medical Science Apps.",
+]
+keywords = ["survival analysis", "machine learning", "cox regression", "random survival forest"]
+
+dependencies = [
+    "numpy>=1.21.0",
+    "pandas>=1.3.0",
+    "scikit-learn>=1.2.0",
+    "scikit-survival>=0.22.0",
+    "lifelines>=0.27.0",
+    "optuna>=3.3.0",
+    "plotly>=5.18.0",
+    "mistune>=3.0.0",
+    "kaleido>=0.2.1",
+    "tabulate>=0.9.0",
+    "xgboost>=1.6.0",
+    "openpyxl>=3.0.0",
+    "shap>=0.42.0",
+    "jupyter>=1.0.0",
+    "ipykernel>=6.0.0",
+]
+
+[project.optional-dependencies]
+deep = [
+    "torch>=1.9.0",
+    "pycox>=0.2.0",
+]
+postgres = [
+    "psycopg2-binary>=2.9.0",
+]
+completion = [
+    "argcomplete>=2.0.0",
+]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+    "pytest-timeout>=2.1.0",
+    "argcomplete>=2.0.0",
+]
+
+[project.scripts]
+mlsurv = "mlsurv.cli:main"
+
+[project.urls]
+"Homepage" = "https://github.com/goeckslab/mlsurv"
+"Bug Tracker" = "https://github.com/goeckslab/mlsurv/issues"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["mlsurv*"]
+
+[tool.setuptools.package-data]
+# PEP 561 marker so type checkers (mypy/pyright) read mlsurv's inline
+# annotations from the installed package.
+mlsurv = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-v --tb=short"
+timeout = 60
+markers = [
+    "slow: marks vignette / long-running tests (> 60s)",
+    "vignette: marks notebook execution tests",
+    "integration: marks full workflow integration tests (10-60s)",
+    "integration_heavy: marks expensive integration tests (tuning, bootstrap, DeepSurv)",
+    "bootstrap_heavy: marks tests with 30+ bootstrap iterations (10-60s)",
+    "parallel: marks parallel execution tests (10-60s)",
+    "shap: marks SHAP importance tests (requires shap library, CPU-intensive)",
+    "full: marks full-suite-only tests (run with --run-full or --run-all)",
+    "requires_pycox: marks tests requiring pycox/torch",
+    "requires_shap: marks tests requiring shap library",
+    "validation: marks reference-implementation validation tests (run with --run-all or -m validation)",
+    "demo: marks demo script smoke tests (run with --run-full or --run-all)",
+]
+filterwarnings = [
+    "ignore::sklearn.exceptions.ConvergenceWarning",
+    "ignore:.*trapz.*:DeprecationWarning",
+    "ignore::FutureWarning:sklearn",
+    "ignore:.*ExperimentalWarning.*:FutureWarning:optuna",
+    # lifelines: pandas-4.0 keyword-only deprecation from
+    # internal var/mean/std calls during fit.  Not user-actionable from
+    # mlsurv.  No category specified so the filter is robust across lifelines
+    # versions that have variously emitted Pandas4Warning (DeprecationWarning)
+    # or UserWarning for the same message.  No module qualifier either: the
+    # emitting submodule varies by lifelines version and call path, and pytest
+    # compiles the module field as an exactly-anchored regex, so `::lifelines`
+    # matched none of them and the warning leaked past pytest's implicit
+    # `always::DeprecationWarning` (Pandas4Warning subclasses
+    # DeprecationWarning).  Matching on the message alone is specific enough to
+    # leave legitimate lifelines warnings (convergence, ill-conditioned
+    # design) flowing.
+    "ignore:Starting with pandas version 4\\.0",
+]
+
+[tool.coverage.run]
+source = ["mlsurv"]
+omit = ["tests/*"]
+
+[tool.pydoclint]
+# numpy-style docstrings; matches the convention used across mlsurv.
+style = "numpy"
+# Ignore `_`-prefixed arguments (e.g. _warn_stacklevel, _quiet,
+# _failure_collector, _surv_probs_transforms). These are deliberately
+# undocumented internals — documenting them would leak implementation detail
+# and create stability commitments we don't want. This clears the remaining
+# DOC101 "bucket D" findings without touching any docstring.
+ignore-private-args = true
+# mlsurv's convention is types-in-numpy-docstring with only partial signature
+# type hints. pydoclint's defaults assume types are mirrored in BOTH the
+# signature and the docstring and cross-check them, which fires ~1700 false
+# positives (DOC105/106/107/203) — all convention/parse artifacts, no real doc
+# errors (verified arg-by-arg). Disable the signature-side type checks so the
+# remaining findings reflect genuine completeness gaps (DOC501/DOC201/DOC503).
+arg-type-hints-in-signature = false
+check-return-types = false

@@ -1,0 +1,115 @@
+name: CI
+
+# CI triggers, by phase:
+#   * Always (private + public): a cheap daily fast-tier heartbeat plus a weekly
+#     full matrix give green/red signal without watching a dashboard (GitHub
+#     emails on failed scheduled runs).
+#   * Public only (github.repository == goeckslab/mlsurv): push-to-main and
+#     pull_request run the fast tier for per-change feedback, and the weekly full
+#     matrix expands to every supported OS/Python combo. These stay inert while
+#     the repo is private — development ff-merges to main many
+#     times a day, so per-commit runs would be noise, and the matrix is trimmed
+#     to fit the 2,000-min/month free tier — and auto-activate the moment the
+#     repo lands at goeckslab. The gate is the repo slug, not repository.private,
+#     because the private flag isn't reliably populated on schedule events.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: '0 13 * * *'   # daily 13:00 UTC — fast tier
+    - cron: '0 7 * * 0'    # Sunday 07:00 UTC — full matrix
+  workflow_dispatch:
+    inputs:
+      tier:
+        description: 'Tier to run on manual dispatch'
+        type: choice
+        options: [fast, full]
+        default: fast
+
+concurrency:
+  # Per-ref so a PR run and a main run don't cancel each other; a new push to the
+  # same ref still supersedes its own in-progress run.
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  fast:
+    # daily cron, manual fast dispatch, or — once public — push-to-main / PR
+    if: >-
+      github.event.schedule == '0 13 * * *' ||
+      (github.event_name == 'workflow_dispatch' && inputs.tier == 'fast') ||
+      ((github.event_name == 'push' || github.event_name == 'pull_request') && github.repository == 'goeckslab/mlsurv')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: python -m pip install --upgrade pip
+      - run: pip install -e .[dev]
+      - run: pytest          # fast tier (default)
+
+  # Emits the full-tier matrix: trimmed while private to fit the free
+  # CI-minute budget, expanded to every supported combo once public.
+  # Runs only when the full job could (weekly cron or full dispatch).
+  config:
+    if: >-
+      github.event.schedule == '0 7 * * 0' ||
+      (github.event_name == 'workflow_dispatch' && inputs.tier == 'full')
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set.outputs.matrix }}
+    steps:
+      # Python <=3.10 is unsupported: the modern test stack (scikit-survival
+      # >=0.27, shap >=0.52, scikit-learn >=1.8) dropped 3.10, so a 3.10 runner
+      # backsolves to older deps and tests fail on version-specific behavior.
+      # Endpoints are the min (3.11) and current (3.12) supported versions.
+      - id: set
+        shell: bash
+        run: |
+          if [ "${{ github.repository }}" = "goeckslab/mlsurv" ]; then
+            # Public: Linux + Windows endpoints, plus macOS sanity.
+            echo 'matrix={"include":[{"os":"ubuntu-latest","python":"3.11"},{"os":"ubuntu-latest","python":"3.12"},{"os":"windows-latest","python":"3.11"},{"os":"windows-latest","python":"3.12"},{"os":"macos-latest","python":"3.12"}]}' >> "$GITHUB_OUTPUT"
+          else
+            # Private: Linux endpoints + one Windows sanity run (path/encoding/loky).
+            echo 'matrix={"include":[{"os":"ubuntu-latest","python":"3.11"},{"os":"ubuntu-latest","python":"3.12"},{"os":"windows-latest","python":"3.12"}]}' >> "$GITHUB_OUTPUT"
+          fi
+
+  full:
+    needs: config
+    runs-on: ${{ matrix.os }}
+    # The full suite runs ~1 hr and varies (~56-86 min on Windows); 120 leaves
+    # headroom over the job cap so a slow run isn't cancelled in teardown.
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false       # one failing combo must not cancel the rest
+      matrix: ${{ fromJSON(needs.config.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+      # XGBoost's macOS wheel links against the OpenMP runtime (libomp.dylib),
+      # absent by default; without it libxgboost.dylib fails to load and every
+      # xgboost-backed test errors.
+      - name: Install libomp on macOS (XGBoost OpenMP runtime)
+        if: runner.os == 'macOS'
+        run: brew install libomp
+      - run: python -m pip install --upgrade pip
+      # Install CPU-only torch first so the package install below doesn't pull
+      # the ~4 GB nvidia-*-cu12 CUDA stack (cudnn, cublas, nccl, ...). CI runs
+      # CPU-only tests, and on Linux the default torch wheel is the CUDA build,
+      # which overflows the runner disk ([Errno 28] No space left on device).
+      - run: pip install torch --index-url https://download.pytorch.org/whl/cpu
+      - run: pip install -e .[deep,dev]
+      # Heavy integration tests on shared CI runners need more headroom than the
+      # 60s per-test default (tuned for the fast tier on a dev machine).
+      - run: pytest --run-full --timeout=300

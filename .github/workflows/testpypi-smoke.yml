@@ -1,0 +1,71 @@
+name: TestPyPI wheel smoke
+
+# Manual-only: after uploading a release (or a .devN rehearsal) to TestPyPI,
+# verify the published wheel installs, imports, runs the CLI, and passes the
+# fast test tier on every supported OS. This is the real `pip install <wheel>`
+# path that ci.yml's editable installs never exercise — it catches MANIFEST /
+# package-data gaps, broken entry points, and platform import failures (e.g. the
+# macOS libomp/XGBoost one). Lean by design: fast tier only (~6 min/OS); ci.yml
+# covers full behavior on its weekly matrix.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Exact version to install from TestPyPI (e.g. 0.1.0.dev3)'
+        required: true
+        default: '0.1.0.dev3'
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false       # one failing OS must not cancel the others
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python: ['3.12']
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+      # XGBoost's macOS wheel links against libomp.dylib (absent by default);
+      # without it libxgboost.dylib fails to load. macOS end users need this too
+      # (see the README note).
+      - name: Install libomp on macOS (XGBoost OpenMP runtime)
+        if: runner.os == 'macOS'
+        run: brew install libomp
+      - run: python -m pip install --upgrade pip
+      # CPU-only torch first so the [deep] extra doesn't pull the ~4 GB CUDA stack.
+      - run: pip install torch --index-url https://download.pytorch.org/whl/cpu
+      - name: Install mlsurv from TestPyPI
+        run: >-
+          pip install
+          --index-url https://test.pypi.org/simple/
+          --extra-index-url https://pypi.org/simple/
+          "mlsurv[dev,deep]==${{ github.event.inputs.version }}"
+      # Delete the local source so import + tests resolve to the installed wheel,
+      # not the checkout. tests/ + conftest + pyproject (pytest config) stay.
+      - name: Drop local source, keep tests
+        shell: bash
+        run: rm -rf mlsurv
+      - name: Import + version + CLI
+        shell: bash
+        run: |
+          python - <<'PY'
+          import mlsurv
+          print("mlsurv:", mlsurv.__version__, "from", mlsurv.__file__)
+          assert "site-packages" in mlsurv.__file__, "import resolved to source, not the wheel"
+          PY
+          mlsurv --help
+      # Fast tier against the wheel (~6 min). The three tests that statically
+      # scan the on-disk mlsurv/ source can't run here (we delete it); they are
+      # source-discipline meta-tests, covered by ci.yml's editable run.
+      - run: >-
+          pytest
+          --deselect tests/test_resolve_model_results.py::test_no_unlisted_state_models_access
+          --deselect tests/test_sections_state_access_discipline.py::test_no_unlisted_state_access_in_sections
+          --deselect tests/test_tuning_contract.py::test_no_tuned_suffix_string_stripping_anywhere

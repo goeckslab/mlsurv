@@ -1,0 +1,74 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="100" height="100">
+  <defs>
+    <!-- Gradient for the survival curve -->
+    <linearGradient id="iconCurveGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#0077B6;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#00B4D8;stop-opacity:1" />
+    </linearGradient>
+
+    <!-- Background gradient -->
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#023E8A;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#0077B6;stop-opacity:1" />
+    </linearGradient>
+  </defs>
+
+  <!-- Rounded square background -->
+  <rect x="5" y="5" width="90" height="90" rx="18" ry="18" fill="url(#bgGrad)"/>
+
+  <!-- Kaplan-Meier step curve (smaller, above text) -->
+  <path d="M 15,20
+           L 28,20
+           L 28,28 L 52,28
+           L 52,36 L 64,36
+           L 64,44 L 76,44
+           L 76,50 L 85,50"
+        fill="none"
+        stroke="#ffffff"
+        stroke-width="4"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        opacity="0.85"/>
+
+  <!-- Event markers -->
+  <circle cx="28" cy="20" r="3" fill="#48CAE4"/>
+  <circle cx="52" cy="28" r="3" fill="#48CAE4"/>
+  <circle cx="64" cy="36" r="3" fill="#90E0EF"/>
+  <circle cx="76" cy="44" r="3" fill="#90E0EF"/>
+
+  <!-- Decision tree branching from second highest step (y=28) down to y=50 -->
+  <!-- Root at 1/3 of second step: 28 + (52-28)*0.33 = 36 -->
+  <g opacity="0.85">
+    <!-- Tree branches (lines) -->
+    <!-- Root to level 1 -->
+    <line x1="36" y1="28" x2="27" y2="39" stroke="#ffffff" stroke-width="2" stroke-linecap="round"/>
+    <line x1="36" y1="28" x2="45" y2="39" stroke="#ffffff" stroke-width="2" stroke-linecap="round"/>
+    <!-- Level 1 to leaves (y=50) -->
+    <line x1="27" y1="39" x2="21" y2="50" stroke="#ffffff" stroke-width="1.5" stroke-linecap="round"/>
+    <line x1="27" y1="39" x2="33" y2="50" stroke="#ffffff" stroke-width="1.5" stroke-linecap="round"/>
+    <line x1="45" y1="39" x2="39" y2="50" stroke="#ffffff" stroke-width="1.5" stroke-linecap="round"/>
+    <line x1="45" y1="39" x2="51" y2="50" stroke="#ffffff" stroke-width="1.5" stroke-linecap="round"/>
+
+    <!-- Tree nodes -->
+    <!-- Root node (on the step line) -->
+    <circle cx="36" cy="28" r="3" fill="#ffffff"/>
+    <!-- Level 1 nodes -->
+    <circle cx="27" cy="39" r="2.5" fill="#ffffff"/>
+    <circle cx="45" cy="39" r="2.5" fill="#ffffff"/>
+    <!-- Leaf nodes at y=50 -->
+    <circle cx="21" cy="50" r="2" fill="#ffffff"/>
+    <circle cx="33" cy="50" r="2" fill="#ffffff"/>
+    <circle cx="39" cy="50" r="2" fill="#ffffff"/>
+    <circle cx="51" cy="50" r="2" fill="#ffffff"/>
+  </g>
+
+  <!-- "mlsurv" centered text -->
+  <text x="50" y="75"
+        font-family="'Segoe UI', Arial, sans-serif"
+        font-size="18"
+        font-weight="700"
+        fill="#ffffff"
+        text-anchor="middle">
+    mlsurv
+  </text>
+</svg>
