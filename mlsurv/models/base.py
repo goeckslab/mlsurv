@@ -726,7 +726,10 @@ class PycoxSerializationMixin:
       (required by ``_validate_pycox_params``).
     """
 
-    _PYCOX_TRAINING_ATTRS = ('callbacks', 'train_metrics', 'val_metrics', 'log')
+    _PYCOX_TRAINING_ATTRS = (
+        'callbacks', 'train_metrics', 'val_metrics', 'log',
+        'batch_metrics', 'batch_loss',
+    )
 
     def _validate_pycox_params(self):
         """Validate weight_decay and gradient_clip common to pycox models."""
