@@ -384,12 +384,13 @@ class BaseTuner:
                 stacklevel=2,
             )
 
-        # Note: the selector's k is NOT auto-tuned. Users who want k tuned must
-        # add it explicitly under the feature_selector component, i.e.
-        # search_spaces={'feature_selector': {'k': (...)}}. A bare
-        # 'k' in a model space belongs to the model, not the selector. This
-        # respects users who provide TopKCoxSelector(k=N) expecting k to stay
-        # fixed while tuning model params.
+        # The selector's k is not tuned by default: a bare 'k' in a model space
+        # belongs to the model, and TopKCoxSelector(k=N) / k='auto' stay fixed
+        # while model params tune. Users opt into searching the feature count in
+        # one of two ways: TopKCoxSelector(k='tune') (the default range is
+        # injected below), or an explicit search_spaces={'feature_selector':
+        # {'k': (...)}}.
+        self._maybe_inject_tune_k_space()
 
         # Use provided CV splitter or create default
         if cv_splitter is not None:
@@ -422,6 +423,83 @@ class BaseTuner:
         return bool(self._consumed_model_keys()) or any(
             self._search_spaces.get(c) for c in ('feature_selector', 'imputer', 'scaler')
         )
+
+    def _default_tune_k_range(self):
+        """Clamped default (lo, hi) range for a ``k='tune'`` feature selector.
+
+        Reads the reference range from ``PREPROCESSING_DEFAULTS`` (``(5, None)``,
+        where ``None`` means ``n_features``) and clamps it to the actual feature
+        count so ``suggest_int`` always gets ``1 <= lo <= hi``.
+        """
+        from .search_spaces import get_preprocessing_defaults
+
+        lo, hi = get_preprocessing_defaults('feature_selector')['TopKCoxSelector']['k']
+        n_features = self.X.shape[1]
+        hi = n_features if hi is None else min(hi, n_features)
+        lo = max(1, min(lo, hi))
+        return (lo, hi)
+
+    def _maybe_inject_tune_k_space(self):
+        """Wire up ``TopKCoxSelector(k='tune')`` and nudge ``k='auto'`` users.
+
+        When the configured selector opts into searching its feature count via
+        ``k='tune'`` and the user gave no explicit ``k`` space, inject the
+        clamped default range so Optuna searches it. When a topk selector is left
+        at the default ``k='auto'`` with no ``k`` space, emit a one-time
+        ``SuggestionWarning`` pointing at ``k='tune'`` (this also flags the
+        silent "auto kept all features" case on high-event cohorts).
+        """
+        from ..preprocessing.selection import TopKCoxSelector
+
+        selector = self._selector
+        if selector is None:
+            return
+
+        # Collect the k values of any TopKCoxSelector step(s). Handles a bare
+        # selector and a multi-step selector Pipeline (steps named sel_0, ...).
+        if hasattr(selector, 'steps'):
+            topk_ks = [step.k for _, step in selector.steps
+                       if isinstance(step, TopKCoxSelector)]
+            is_pipeline = True
+        elif isinstance(selector, TopKCoxSelector):
+            topk_ks = [selector.k]
+            is_pipeline = False
+        else:
+            return
+        if not topk_ks:
+            return
+
+        # Is a k space already specified (broadcast 'k' or class-specific)?
+        space = self._search_spaces.get('feature_selector', {})
+        class_space = space.get('TopKCoxSelector')
+        user_set_k = 'k' in space or (
+            isinstance(class_space, dict) and 'k' in class_space
+        )
+
+        if any(k == 'tune' for k in topk_ks):
+            if not user_set_k:
+                fs = self._search_spaces.setdefault('feature_selector', {})
+                if is_pipeline:
+                    # Class-specific so it maps to the TopK step(s) by class name.
+                    # Rebuild the inner dict rather than mutating in place: under
+                    # a broadcast component space, _parse_search_spaces only
+                    # shallow-copies, so a user-provided 'TopKCoxSelector' dict
+                    # can be shared across every model's tuner.
+                    fs['TopKCoxSelector'] = {
+                        **fs.get('TopKCoxSelector', {}),
+                        'k': self._default_tune_k_range(),
+                    }
+                else:
+                    fs['k'] = self._default_tune_k_range()
+        elif not user_set_k and any(k == 'auto' for k in topk_ks):
+            warnings.warn(
+                "Tuning with a TopKCoxSelector left at k='auto' (Harrell m/15) "
+                "does not search the number of features. Set k='tune' on the "
+                "selector to let Optuna search it, or pass "
+                "search_spaces={'feature_selector': {'k': (lo, hi)}}.",
+                SuggestionWarning,
+                stacklevel=2,
+            )
 
     def _cv_split(self):
         """Generate CV splits, passing groups if cv is GroupKFold."""

@@ -110,6 +110,32 @@ learner.tune('rsf', search_spaces={
 
 Each component's parameters are namespaced to that component, so a model and a preprocessing step can share a parameter name without collision (e.g. a model with its own `k` hyperparameter is tuned independently of the selector's `k`).
 
+**`search_spaces` in `run()` and multi-model `train()`.** With more than one model, `search_spaces` accepts two forms:
+
+```python
+# Component-structured: applied to EVERY model in the run
+learner.run(['coxph', 'coxnet'], search_spaces={'feature_selector': {'k': (5, 20)}})
+
+# Per-model: each model gets its own space (top-level keys are model names)
+learner.run(['coxph', 'rsf'], search_spaces={
+    'coxph': {'feature_selector': {'k': (5, 20)}},
+    'rsf':   {'model': {'n_estimators': (100, 500)}},
+})
+```
+
+The top-level keys decide the form: component names (`model`, `feature_selector`, `imputer`, `scaler`) mean "apply this to all models," while model names mean "per-model." A per-model key that matches no model in the run is reported with a warning rather than dropped silently; mixing the two forms raises `ValueError`.
+
+**Tuning the feature count without a `search_spaces` dict.** Setting the selector's `k` to `'tune'` opts into searching the number of retained features with no `search_spaces` argument at all: the default range `(5, n_features)` is applied automatically:
+
+```python
+from mlsurv.preprocessing import TopKCoxSelector
+
+learner.setup(feature_selector=TopKCoxSelector(k='tune'))
+learner.run(['coxph', 'coxnet'], tune=True)   # k searched for every model
+```
+
+Pass an explicit `search_spaces={'feature_selector': {'k': (lo, hi)}}` to override the default range.
+
 ### Custom Configuration
 
 ```python

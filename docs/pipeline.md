@@ -103,7 +103,7 @@ Five built-in selectors are available:
 
 | Selector | Method | Notes |
 |----------|--------|-------|
-| `'topk'` | Univariate Cox ranking<sup>[7](#references)</sup> | Automatic dimensionality via Harrell's rule (EPV/10)<sup>[4](#references)</sup> |
+| `'topk'` | Univariate Cox ranking<sup>[7](#references)</sup> | Automatic dimensionality via Harrell's rule (`m / 15`, where `m` is the event count)<sup>[4](#references)</sup> |
 | `'coxlasso'` | L1-penalized Cox regression<sup>[6](#references)</sup> | Selects features with non-zero coefficients |
 | `'coxnet'` | Elastic net Cox regression<sup>[6](#references)</sup> | Combines L1 and L2 penalization |
 | `'vif'` | Variance inflation factor | Removes features with high multicollinearity |
@@ -116,6 +116,20 @@ learner.setup(feature_selector='topk', random_state=42)
 ```
 
 Custom selector objects (any scikit-learn transformer) can also be supplied directly.
+
+**Choosing how many features `'topk'` keeps.** The `'topk'` shortcut is
+`TopKCoxSelector(k='auto')`. Its `k` accepts three forms:
+
+- `'auto'` (default): Harrell's `m / 15` rule, `min(n_features, max(1, n_events // 15))`.
+  On high-event cohorts this can equal `n_features`, in which case no selection
+  happens (all features are kept).
+- an integer: keep exactly that many top-ranked features, e.g.
+  `setup(feature_selector=TopKCoxSelector(k=10))`.
+- `'tune'`: let Optuna search the feature count while tuning. Pass
+  `setup(feature_selector=TopKCoxSelector(k='tune'))` and tune (`run(..., tune=True)`
+  or `tune()`); the default range `(5, n_features)` is searched automatically, so
+  no `search_spaces` argument is needed. See
+  [Model Development & Evaluation: Pipeline-Wide Tuning](evaluation.md#pipeline-wide-tuning).
 
 ## Automated Setup Checks
 

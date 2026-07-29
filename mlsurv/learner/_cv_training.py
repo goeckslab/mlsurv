@@ -619,20 +619,21 @@ class CvTrainingMixin:
         dict of {str: ModelResult}
         """
         from ._training import (
-            _resolve_per_model, _warn_unused_model_params,
-            _check_search_space_model_params,
+            _resolve_per_model, _resolve_model_search_spaces,
+            _warn_unused_model_params, _check_search_space_model_params,
         )
         from .._shared import _warn_unused_dict_keys
 
         action = "tune" if tune else "train"
         model_results = {}
         errors = {}
+        resolved_search_spaces = (
+            _resolve_model_search_spaces(search_spaces, models) if tune else {}
+        )
         for model_name in models:
             try:
                 if tune:
-                    model_search_spaces = (
-                        search_spaces.get(model_name) if search_spaces else None
-                    )
+                    model_search_spaces = resolved_search_spaces[model_name]
                     model_n_trials = _resolve_per_model(n_trials, model_name, default='auto')
                     result = self._tune_and_train(
                         model_name, model_n_trials, model_search_spaces, experiment_name,

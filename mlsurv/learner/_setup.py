@@ -559,10 +559,14 @@ class SetupMixin:
             - None: Skip scaling
         feature_selector : str, Transformer, list, or None, default=None
             Feature selection method. Accepts:
-            - String shortcuts: 'topk', 'vif', 'correlation'
+            - String shortcuts: 'topk', 'coxlasso', 'coxnet', 'vif', 'correlation'
             - Transformer: Custom sklearn transformer
             - List: Wrapped in Pipeline (e.g., ['vif', TopKCoxSelector(k='auto')])
             - None: No feature selection
+            The ``'topk'`` shortcut is ``TopKCoxSelector(k='auto')``. To search
+            the number of features while tuning, pass
+            ``TopKCoxSelector(k='tune')`` (the default ``(5, n_features)`` range
+            is searched automatically; no ``search_spaces`` needed).
         preprocessing : dict, optional
             Per-model preprocessing overrides. Dict of
             ``{model_name: {component: value}}`` where component is one of

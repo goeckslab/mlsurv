@@ -89,9 +89,19 @@ class TopKCoxSelector(FeatureSelectorMixin, BaseEstimator, TransformerMixin):
 
     Parameters
     ----------
-    k : int or 'auto', default='auto'
-        Number of features to select. If ``'auto'``, uses Harrell's rule:
-        ``min(n_features, max(1, n_events // 15))``.
+    k : int, 'auto', or 'tune', default='auto'
+        Number of features to select.
+
+        - ``'auto'``: Harrell's rule, ``min(n_features, max(1, n_events // 15))``.
+          Note that on high-event cohorts this can equal ``n_features`` (no
+          selection occurs).
+        - an ``int``: keep exactly that many top-ranked features.
+        - ``'tune'``: let Optuna search the feature count during
+          ``learner.tune(...)`` / ``learner.run(..., tune=True)``. The tuner
+          applies the default range ``(5, n_features)`` (clamped) unless you
+          supply an explicit ``search_spaces={'feature_selector': {'k': (lo, hi)}}``.
+          Fitting a selector with ``k='tune'`` outside of tuning raises
+          ``ValueError``.
 
         Harrell, F.E. (2015). *Regression Modeling Strategies*, 2nd ed.,
         Springer. Chapter 4 recommends n_predictors < m/15 where m is the
@@ -158,9 +168,11 @@ class TopKCoxSelector(FeatureSelectorMixin, BaseEstimator, TransformerMixin):
     """
 
     def __init__(self, k='auto', penalizer=0.01, verbose=False, n_jobs=1, force_parallel=False):
-        if k != 'auto':
+        if k not in ('auto', 'tune'):
             if isinstance(k, bool) or not isinstance(k, (int, np.integer)) or k < 1:
-                raise ValueError(f"k must be 'auto' or an integer >= 1, got {k!r}")
+                raise ValueError(
+                    f"k must be 'auto', 'tune', or an integer >= 1, got {k!r}"
+                )
         self.k = k
         self.penalizer = penalizer
         self.verbose = verbose
@@ -202,6 +214,13 @@ class TopKCoxSelector(FeatureSelectorMixin, BaseEstimator, TransformerMixin):
         self.feature_names_in_ = np.array(X.columns)
 
         # Resolve effective_k_
+        if self.k == 'tune':
+            raise ValueError(
+                "k='tune' means the number of features must be searched by the "
+                "tuner, but this selector was fit with k still set to 'tune'. "
+                "Run under tuning (learner.tune(...) or "
+                "learner.run(..., tune=True)), or set k to 'auto' or an integer."
+            )
         if self.k == 'auto':
             n_events = int(y['event'].sum())
             # Harrell's rule: n_predictors < m/15 (Regression Modeling Strategies, 2nd ed.)

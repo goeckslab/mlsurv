@@ -432,3 +432,190 @@ class TestBackwardCompatibility:
         # Should work without errors
         assert result is not None
         assert result.best_params_ is not None
+
+
+class TestResolveModelSearchSpaces:
+    """Unit tests for multi-model search_spaces resolution (fast, no Optuna)."""
+
+    @staticmethod
+    def _resolve(search_spaces, model_names):
+        from mlsurv.learner._training import _resolve_model_search_spaces
+        return _resolve_model_search_spaces(search_spaces, model_names)
+
+    def test_none_gives_all_none(self):
+        assert self._resolve(None, ['coxph', 'rsf']) == {'coxph': None, 'rsf': None}
+
+    def test_empty_dict_gives_all_none(self):
+        assert self._resolve({}, ['coxph', 'rsf']) == {'coxph': None, 'rsf': None}
+
+    def test_component_form_broadcasts_to_all_models(self):
+        ss = {'feature_selector': {'k': (5, 20)}}
+        out = self._resolve(ss, ['coxph', 'coxnet'])
+        assert out == {'coxph': ss, 'coxnet': ss}
+
+    def test_component_form_with_model_space_broadcasts(self):
+        ss = {'model': {'alpha': (0.1, 1.0)}, 'feature_selector': {'k': (3, 5)}}
+        out = self._resolve(ss, ['coxph', 'rsf'])
+        assert out['coxph'] is ss and out['rsf'] is ss
+
+    def test_per_model_form(self):
+        ss = {'coxph': {'feature_selector': {'k': (3, 5)}}}
+        out = self._resolve(ss, ['coxph', 'rsf'])
+        assert out['coxph'] == {'feature_selector': {'k': (3, 5)}}
+        assert out['rsf'] is None
+
+    def test_unmatched_per_model_key_warns(self):
+        from mlsurv._warnings import SuggestionWarning
+        with pytest.warns(SuggestionWarning, match='search_spaces'):
+            out = self._resolve({'coxph': {'model': {}}}, ['rsf'])
+        assert out == {'rsf': None}
+
+    def test_mixed_form_raises(self):
+        with pytest.raises(ValueError, match='mixes component keys'):
+            self._resolve(
+                {'feature_selector': {'k': (3, 5)}, 'coxph': {}}, ['coxph']
+            )
+
+
+class TestKTuneValidation:
+    """Unit tests for TopKCoxSelector(k='tune') (fast, no Optuna)."""
+
+    def test_init_accepts_tune_auto_int(self):
+        from mlsurv.preprocessing import TopKCoxSelector
+        TopKCoxSelector(k='tune')
+        TopKCoxSelector(k='auto')
+        TopKCoxSelector(k=5)
+
+    @pytest.mark.parametrize('bad', [0, -1, 2.5, True])
+    def test_init_rejects_bad_k(self, bad):
+        from mlsurv.preprocessing import TopKCoxSelector
+        with pytest.raises(ValueError, match="k must be"):
+            TopKCoxSelector(k=bad)
+
+    def test_fit_with_tune_raises(self, small_data):
+        from mlsurv.preprocessing import TopKCoxSelector
+        X, y = small_data
+        with pytest.raises(ValueError, match="k='tune'"):
+            TopKCoxSelector(k='tune').fit(X, y)
+
+
+@pytest.mark.integration
+class TestMultiModelSearchSpaces:
+    """End-to-end: component-structured search_spaces + k='tune' across models."""
+
+    def _learner(self, small_data, selector):
+        from mlsurv import SurvivalLearner
+        X, y = small_data
+        learner = SurvivalLearner(X, y)
+        learner.setup(test_fraction=0.3, cv_folds=2, random_state=42,
+                      feature_selector=selector)
+        return learner
+
+    def test_component_dict_broadcasts_in_run(self, small_data):
+        """run() applies a component-structured space to every model.
+
+        Regression: coxph (no model params) must be tuned, not skipped, and
+        coxnet must tune feature_selector__k on top of its model params.
+        """
+        from mlsurv.preprocessing import TopKCoxSelector
+        learner = self._learner(small_data, TopKCoxSelector(k=5))
+        results = learner.run(
+            ['coxph', 'coxnet'], tune=True, n_trials=2,
+            search_spaces={'feature_selector': {'k': (2, 4)}},
+            evaluate=False, bootstrap=False, verbose=False,
+        )
+        for name in ('coxph', 'coxnet'):
+            bp = results[name].best_params_
+            assert bp is not None and 'feature_selector__k' in bp, name
+            assert 2 <= bp['feature_selector__k'] <= 4
+        # coxnet still tunes its own model params alongside k.
+        assert 'l1_ratio' in results['coxnet'].best_params_
+
+    def test_component_dict_broadcasts_in_train_list(self, small_data):
+        """Multi-model train([...]) broadcasts the same component space."""
+        from mlsurv.preprocessing import TopKCoxSelector
+        learner = self._learner(small_data, TopKCoxSelector(k=5))
+        results = learner.train(
+            ['coxph', 'rsf'], tune=True, n_trials=2,
+            search_spaces={'feature_selector': {'k': (2, 4)}},
+        )
+        for name in ('coxph', 'rsf'):
+            assert 'feature_selector__k' in results[name].best_params_, name
+
+    def test_k_tune_in_run_without_search_spaces(self, small_data):
+        """k='tune' searches the feature count with no search_spaces arg.
+
+        The injected default range is (min(5, n_features), n_features), so the
+        tuned k must land inside it (not stuck at 'auto').
+        """
+        from mlsurv.preprocessing import TopKCoxSelector
+        X, _ = small_data
+        n_feat = X.shape[1]
+        learner = self._learner(small_data, TopKCoxSelector(k='tune'))
+        results = learner.run(['coxph'], tune=True, n_trials=2,
+                              evaluate=False, bootstrap=False, verbose=False)
+        k = results['coxph'].best_params_['feature_selector__k']
+        assert min(5, n_feat) <= k <= n_feat
+
+    def test_k_tune_clamps_range_below_five_features(self, small_data):
+        """With < 5 features the default (5, n_features) range clamps to (n, n).
+
+        Exercises the lo = max(1, min(5, hi)) clamp in _default_tune_k_range.
+        """
+        from mlsurv import SurvivalLearner
+        from mlsurv.preprocessing import TopKCoxSelector
+        X, y = small_data
+        X3 = X.iloc[:, :3]  # 3 features < 5
+        learner = SurvivalLearner(X3, y)
+        learner.setup(test_fraction=0.3, cv_folds=2, random_state=42,
+                      feature_selector=TopKCoxSelector(k='tune'))
+        result = learner.tune('coxph', n_trials=2)
+        # range clamps to (3, 3) -> the only valid value is 3
+        assert result.best_params_['feature_selector__k'] == 3
+
+    def test_k_tune_multistep_pipeline_class_specific(self, small_data):
+        """k='tune' inside a multi-step selector Pipeline injects a
+        class-specific space, producing the nested Optuna key."""
+        from mlsurv import SurvivalLearner
+        from mlsurv.preprocessing import VIFSelector, TopKCoxSelector
+        X, y = small_data
+        learner = SurvivalLearner(X, y)
+        learner.setup(
+            test_fraction=0.3, cv_folds=2, random_state=42,
+            feature_selector=[VIFSelector(threshold=10), TopKCoxSelector(k='tune')],
+        )
+        result = learner.tune('coxph', n_trials=2)
+        assert 'feature_selector__sel_1__k' in result.best_params_
+
+    def test_k_tune_in_tune_single_model(self, small_data):
+        """k='tune' also works via single-model tune()."""
+        from mlsurv.preprocessing import TopKCoxSelector
+        learner = self._learner(small_data, TopKCoxSelector(k='tune'))
+        result = learner.tune('coxph', n_trials=2)
+        assert 'feature_selector__k' in result.best_params_
+
+    def test_explicit_k_space_overrides_tune_default(self, small_data):
+        """An explicit k range wins over the injected k='tune' default."""
+        from mlsurv.preprocessing import TopKCoxSelector
+        learner = self._learner(small_data, TopKCoxSelector(k='tune'))
+        result = learner.tune('coxph', n_trials=3,
+                              search_spaces={'feature_selector': {'k': (2, 3)}})
+        assert 2 <= result.best_params_['feature_selector__k'] <= 3
+
+    def test_k_auto_under_tune_emits_nudge(self, small_data):
+        """A topk selector left at k='auto' nudges toward k='tune'."""
+        from mlsurv._warnings import SuggestionWarning
+        from mlsurv.preprocessing import TopKCoxSelector
+        learner = self._learner(small_data, TopKCoxSelector(k='auto'))
+        with pytest.warns(SuggestionWarning, match="k='tune'"):
+            learner.tune('rsf', n_trials=2)
+
+    def test_fixed_k_does_not_nudge(self, small_data, recwarn):
+        """A deliberately fixed k=int does not emit the k='tune' nudge."""
+        from mlsurv.preprocessing import TopKCoxSelector
+        learner = self._learner(small_data, TopKCoxSelector(k=4))
+        learner.tune('rsf', n_trials=2)
+        assert not any(
+            "k='tune'" in str(w.message) and 'does not search' in str(w.message)
+            for w in recwarn
+        )

@@ -346,8 +346,15 @@ class TuningMixin:
             If only model params are needed, can pass flat dict for backward
             compatibility: {'n_estimators': (100, 500)} is equivalent to
             {'model': {'n_estimators': (100, 500)}}
+            This is the single-model form: pass the space directly. The
+            per-model wrapper ``{model_name: {...}}`` is only for the
+            multi-model ``run()`` / ``train([...])`` calls. Passing it here
+            reads the model name as a model hyperparameter (a
+            ``SuggestionWarning`` fires and nothing is tuned), so unwrap it:
+            use ``{'feature_selector': {'k': (...)}}``, not
+            ``{'coxph': {'feature_selector': {'k': (...)}}}``.
             For a custom ``BaseSurvivalModel`` instance, the ``'model'`` space
-            merges with — and overrides — the instance's declared
+            merges with (and overrides) the instance's declared
             ``get_search_space()``.
         search_space : dict, optional
             Backward-compatible singular alias for ``search_spaces``. If both

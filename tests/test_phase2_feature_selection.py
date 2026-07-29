@@ -230,20 +230,20 @@ class TestTopKCoxSelectorAutoK:
         """Verify invalid k values raise ValueError."""
         from mlsurv.preprocessing import TopKCoxSelector
 
-        with pytest.raises(ValueError, match="k must be 'auto' or an integer >= 1"):
+        with pytest.raises(ValueError, match="k must be 'auto', 'tune', or an integer >= 1"):
             TopKCoxSelector(k=0)
-        with pytest.raises(ValueError, match="k must be 'auto' or an integer >= 1"):
+        with pytest.raises(ValueError, match="k must be 'auto', 'tune', or an integer >= 1"):
             TopKCoxSelector(k=-1)
-        with pytest.raises(ValueError, match="k must be 'auto' or an integer >= 1"):
+        with pytest.raises(ValueError, match="k must be 'auto', 'tune', or an integer >= 1"):
             TopKCoxSelector(k=3.5)
 
     def test_bool_k_rejected(self):
         """Verify k=True/False are rejected (bool is subclass of int)."""
         from mlsurv.preprocessing import TopKCoxSelector
 
-        with pytest.raises(ValueError, match="k must be 'auto' or an integer >= 1"):
+        with pytest.raises(ValueError, match="k must be 'auto', 'tune', or an integer >= 1"):
             TopKCoxSelector(k=True)
-        with pytest.raises(ValueError, match="k must be 'auto' or an integer >= 1"):
+        with pytest.raises(ValueError, match="k must be 'auto', 'tune', or an integer >= 1"):
             TopKCoxSelector(k=False)
 
     def test_explicit_k_equals_n_features(self, synthetic_data_clean):

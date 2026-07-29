@@ -108,6 +108,71 @@ def _resolve_per_model(value, model_name, default):
     return value
 
 
+# Top-level keys that mark a search_spaces dict as *component-structured* (one
+# space describing the pipeline), mirroring _parse_search_spaces in tuning/base.py.
+# No registered model shares a name with any of these, so the two forms below are
+# never ambiguous.
+_COMPONENT_SEARCH_SPACE_KEYS = frozenset(
+    {'model', 'feature_selector', 'imputer', 'scaler'}
+)
+
+
+def _resolve_model_search_spaces(search_spaces, model_names):
+    """Map a multi-model ``search_spaces`` to a per-model dict.
+
+    ``run()`` / multi-model ``train()`` accept two forms:
+
+    - **Component-structured** -- top-level keys are component names
+      (``model``/``feature_selector``/``imputer``/``scaler``), e.g.
+      ``{'feature_selector': {'k': (5, 20)}}``. The same space is applied to
+      **every** model (broadcast), matching how single-model ``tune()`` reads it.
+    - **Per-model** -- top-level keys are model names, e.g.
+      ``{'coxph': {'feature_selector': {'k': (5, 20)}}}``. Each model gets its
+      own space; keys matching no model in *model_names* are ignored with a
+      ``SuggestionWarning`` (rather than dropped silently).
+
+    Parameters
+    ----------
+    search_spaces : dict or None
+        The user-supplied ``search_spaces``.
+    model_names : list of str
+        Models being trained.
+
+    Returns
+    -------
+    dict of {str: dict or None}
+        Per-model search space (``None`` when a model has none).
+
+    Raises
+    ------
+    ValueError
+        If the dict mixes component keys with model-name keys.
+    """
+    if not search_spaces:
+        return {name: None for name in model_names}
+
+    component_keys = set(search_spaces) & _COMPONENT_SEARCH_SPACE_KEYS
+    model_keys = set(search_spaces) - _COMPONENT_SEARCH_SPACE_KEYS
+
+    if component_keys and model_keys:
+        raise ValueError(
+            "search_spaces mixes component keys "
+            f"{sorted(component_keys)} with non-component keys "
+            f"{sorted(model_keys)}. Use EITHER a component-structured dict "
+            "applied to all models (e.g. {'feature_selector': {'k': (5, 20)}}) "
+            "OR a per-model dict (e.g. {'coxph': {'feature_selector': "
+            "{'k': (5, 20)}}}), not both."
+        )
+
+    if component_keys:
+        # Broadcast the one space to every model.
+        return {name: search_spaces for name in model_names}
+
+    # Per-model form: surface keys that match no model instead of dropping them.
+    _warn_unused_dict_keys(search_spaces, "search_spaces", model_names)
+    return {name: search_spaces.get(name) for name in model_names}
+
+
 def _validate_model_params(model_params, kwargs):
     """Validate model_params structure and check for conflict with kwargs.
 
@@ -318,8 +383,14 @@ class TrainingMixin(CvTrainingMixin):
             Overrides the experiment_name set in setup().
         search_spaces : dict, optional
             Custom search spaces for tuning. Only used when tune=True.
-            For single model: dict of {param: distribution}.
-            For multiple models: dict of {model_name: {param: distribution}}.
+            For a single model: a flat ``{param: distribution}`` or the
+            component-structured ``{'model': {...}, 'feature_selector': {...}}``.
+            For multiple models: either a **component-structured** dict applied
+            to every model (top-level keys ``model``/``feature_selector``/
+            ``imputer``/``scaler``) or a **per-model** dict of
+            ``{model_name: {...}}``; mixing the two raises ``ValueError`` (see
+            ``run()`` for details). To search the feature count without a dict,
+            set the selector's ``k='tune'`` (see ``TopKCoxSelector``).
             For a custom model instance, ``{'model': {param: distribution}}``
             (or a flat ``{param: distribution}``) merges with — and overrides —
             the model's declared ``get_search_space()``.
@@ -666,12 +737,14 @@ class TrainingMixin(CvTrainingMixin):
         action = "tune" if tune else "train"
         results = {}
         errors = {}
+        resolved_search_spaces = (
+            _resolve_model_search_spaces(search_spaces, models_to_train)
+            if tune else {}
+        )
         for model_name in models_to_train:
             try:
                 if tune:
-                    model_search_spaces = (
-                        search_spaces.get(model_name) if search_spaces else None
-                    )
+                    model_search_spaces = resolved_search_spaces[model_name]
                     model_n_trials = _resolve_per_model(n_trials, model_name, default='auto')
                     results[model_name] = self._train_single_with_tuning(
                         model_name,
@@ -1202,7 +1275,15 @@ class TrainingMixin(CvTrainingMixin):
         sort_by : str, default='c_index'
             Metric to sort results by.
         search_spaces : dict, optional
-            Per-model search spaces.
+            Two accepted forms. A **component-structured** dict whose top-level
+            keys are component names (``model``/``feature_selector``/``imputer``/
+            ``scaler``), e.g. ``{'feature_selector': {'k': (5, 20)}}``, is applied
+            to every model. A **per-model** dict whose top-level keys are model
+            names, e.g. ``{'coxph': {'feature_selector': {'k': (5, 20)}}}``, gives
+            each model its own space; keys matching no model in the run are
+            reported with a warning. Mixing the two forms raises ``ValueError``.
+            To search the feature count without a dict, set the selector's
+            ``k='tune'`` (see ``TopKCoxSelector``).
         experiment_name : str, optional
             Experiment name for Optuna studies. Overrides setup() default.
         verbose : bool, default=True
