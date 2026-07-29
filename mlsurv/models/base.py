@@ -1,5 +1,6 @@
 """Base class for all mlsurv survival models."""
 
+import itertools
 import warnings
 from abc import ABC, abstractmethod
 from sklearn.base import BaseEstimator, clone
@@ -683,6 +684,28 @@ class BaseSurvivalModel(BaseEstimator, SurvivalAnalysisMixin, ABC):
         return f"{self.__class__.__name__}({param_str})"
 
 
+# Moving a module to an absent device does not raise one consistent type: a
+# CPU-only torch build asserts ("Torch not compiled with CUDA enabled"), while
+# a CUDA build raises RuntimeError for a bad ordinal, OOM, or driver mismatch.
+_DEVICE_MOVE_ERRORS = (RuntimeError, AssertionError)
+
+
+def _has_non_cpu_params(net):
+    """Return True if any parameter or buffer of *net* lives off the CPU.
+
+    Named (rather than inlined) so tests can simulate a GPU-resident net on a
+    CPU-only machine.
+    """
+    if net is None or not (hasattr(net, 'parameters') and hasattr(net, 'buffers')):
+        # Not a torch Module, so there is nothing to move. Anything else the
+        # iteration raises is a real problem and propagates.
+        return False
+    return any(
+        t.device.type != 'cpu'
+        for t in itertools.chain(net.parameters(), net.buffers())
+    )
+
+
 class PycoxSerializationMixin:
     """Mixin for pycox-based models (DeepSurv, DeepHit) to handle pickling.
 
@@ -690,6 +713,12 @@ class PycoxSerializationMixin:
     contain lambdas and DataLoader references. These are transient training
     artifacts not needed for prediction; this mixin strips them to allow
     joblib pickling.
+
+    Torch tensors remember the device they were saved from, and a plain
+    ``joblib.load`` offers no way to remap them, so a GPU-trained model would
+    otherwise be unloadable on a CPU-only host. To keep saved models portable,
+    ``__getstate__`` writes CPU tensors and ``__setstate__`` puts the model back
+    on whichever device is actually available.
 
     Subclasses must:
     - Store the fitted pycox model as ``self.model_``.
@@ -715,6 +744,7 @@ class PycoxSerializationMixin:
 
         state = self.__dict__.copy()
         model = state.get('model_')
+        model_copy = None
         if model is not None:
             try:
                 model_copy = copy.copy(model)
@@ -732,10 +762,131 @@ class PycoxSerializationMixin:
             if hasattr(model_copy, '_optimizer'):
                 model_copy._optimizer = None
             state['model_'] = model_copy
+
+        # Write CPU tensors so the pickle loads on any host. Skipped entirely
+        # for a CPU-trained net (the common case), which keeps that path
+        # byte-for-byte what it was.
+        net = state.get('net_')
+        if net is None and model_copy is not None:
+            net = getattr(model_copy, 'net', None)
+        if _has_non_cpu_params(net):
+            import torch
+
+            # deepcopy first: copy.copy(model) above is shallow, so
+            # model_copy.net is still the live net_, and Module.to() moves
+            # parameters in place. The copy is allocated on the training device
+            # before being moved, so peak GPU memory for the net doubles here;
+            # on a memory-tight GPU that turns save_learner() into an OOM. Fine
+            # for the MLPs these wrappers build, worth knowing for bigger nets.
+            net_cpu = copy.deepcopy(net).to('cpu')
+            if 'net_' in state:
+                state['net_'] = net_cpu
+            if model_copy is not None:
+                # Rewiring .net is what actually keeps GPU tensors out of the
+                # pickle, so it must not depend on set_device() being present.
+                # It also preserves the live invariant that model_.net is net_.
+                model_copy.net = net_cpu
+                if hasattr(model_copy, 'set_device'):
+                    model_copy.set_device(torch.device('cpu'))
         return state
 
     def __setstate__(self, state):
         self.__dict__.update(state)
+        self._restore_device()
+
+    def _restore_device(self):
+        """Put a just-unpickled model back on an available device.
+
+        ``__getstate__`` stores CPU tensors, so a model trained on a GPU has to
+        be moved back after loading. ``self.device`` records what the user asked
+        for at fit time; when that device isn't reachable here (no CUDA, or a
+        lower GPU index than the training host had), settle for the best device
+        this host does have and say so.
+
+        ``self.device`` is deliberately left alone. It is a constructor
+        parameter, so it carries the user's request rather than describing where
+        the weights currently sit — that is ``model_.device``. Rewriting it
+        would drop the request from ``get_params()``/``clone()`` for good, and
+        would disagree with the learner's own ``_state.device``, which this
+        wrapper cannot see.
+        """
+        model = getattr(self, 'model_', None)
+        net = getattr(self, 'net_', None)
+        if model is None and net is None:
+            # Nothing fitted yet, so there is no state to place. self.device is
+            # left as the user set it; fit() will resolve it and raise a clear
+            # ValueError if it names a device this host doesn't have.
+            return
+
+        import torch
+
+        requested = getattr(self, 'device', None)
+        reason = None
+        try:
+            target = self._resolve_device(requested)
+        except ValueError as exc:
+            # No CUDA here, or an unparseable device string.
+            target = torch.device('cpu')
+            reason = str(exc)
+
+        # Devices to try, best first. A move fails well beyond "no GPU": a
+        # 'cuda:3' model on a one-GPU host, out-of-memory, a driver mismatch,
+        # or CUDA re-initialization inside a forked worker. Another GPU here
+        # may still work, so try what 'auto' picks before giving up on
+        # acceleration entirely. The last candidate has to succeed — failing
+        # to reach it is a real bug rather than an absent device, so it
+        # propagates instead of warning.
+        candidates = [target]
+        if target.type != 'cpu':
+            for fallback in (self._resolve_device('auto'), torch.device('cpu')):
+                # Skipping a repeat keeps the warning honest: retrying the very
+                # device that just failed can succeed after a transient error,
+                # and then the message would read "could not be restored ...
+                # loaded onto cuda instead" of cuda.
+                if fallback not in candidates:
+                    candidates.append(fallback)
+
+        for index, candidate in enumerate(candidates):
+            try:
+                self._move_to_device(model, net, candidate)
+            except _DEVICE_MOVE_ERRORS as exc:
+                if index == len(candidates) - 1:
+                    raise
+                detail = f"{type(exc).__name__}: {exc}"
+                # Lead with the device the user actually lost; a fallback that
+                # failed on the way down is context, not the headline.
+                reason = detail if reason is None else f"{reason}; then {detail}"
+            else:
+                target = candidate
+                break
+
+        if reason is not None:
+            warnings.warn(
+                f"{type(self).__name__}: model was trained with "
+                f"device={requested!r}, which could not be restored here "
+                f"({reason}). It has been loaded onto {target} instead, so "
+                f"predictions will run there. device={requested!r} is kept for "
+                f"re-fitting.",
+                SuggestionWarning,
+                stacklevel=2,
+            )
+
+    @staticmethod
+    def _move_to_device(model, net, target):
+        """Move the pycox model and its net to *target*.
+
+        The two moves are independent on purpose: a pycox model without
+        ``set_device`` must not leave the net stranded on the wrong device.
+        ``Module.to()`` is a no-op when the module is already there, so moving
+        the same net twice is harmless.
+        """
+        if net is not None:
+            net.to(target)
+        if model is not None:
+            if hasattr(model, 'set_device'):
+                model.set_device(target)
+            elif getattr(model, 'net', None) is not None:
+                model.net.to(target)
 
 
 class ImpurityImportanceMixin:

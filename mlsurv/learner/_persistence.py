@@ -20,6 +20,33 @@ if TYPE_CHECKING:
     from mlsurv.learner._core import SurvivalLearner
 
 
+def _gpu_state_hint(exc, path):
+    """Return a targeted message when *exc* is a cross-device unpickling error.
+
+    Torch tensors carry the device they were pickled from. Files written by an
+    older mlsurv on a GPU host hold CUDA tensors outright, and no amount of
+    care at load time can map them onto a machine without that device. Say so,
+    instead of letting it read as file corruption.
+
+    Returns ``None`` when *exc* is not that failure.
+    """
+    # Anchor on torch's own wording, not the bare words 'CUDA' or 'deserialize'.
+    # Either alone also matches unrelated failures — a truncated pickle, a
+    # version skew, an out-of-memory error on a host that does have a GPU — and
+    # would turn an honestly uncertain message into a confident wrong diagnosis.
+    # The full phrase covers torch's CUDA and MPS variants and nothing else.
+    if 'deserialize object on' not in str(exc):
+        return None
+    return (
+        f"Failed to load {path}: it holds model state saved on a GPU device "
+        f"that is not available here. Files written by a version of mlsurv "
+        f"that stored GPU tensors can only be opened where that device exists. "
+        f"Load it there, then re-save it with this version, which stores "
+        f"CPU-portable model state. "
+        f"Original error: {type(exc).__name__}: {exc}"
+    )
+
+
 def _environment_fingerprint():
     """
     Capture an environment fingerprint for artifact metadata.
@@ -289,6 +316,9 @@ class PersistenceMixin:
                     f"dependency. Install the required package and retry: {exc}"
                 ) from exc
             except Exception as exc:
+                hint = _gpu_state_hint(exc, model_path)
+                if hint:
+                    raise RuntimeError(hint) from exc
                 raise RuntimeError(
                     f"Failed to load model from {model_path}. This may "
                     f"indicate version incompatibility or file corruption: {exc}"
@@ -413,6 +443,9 @@ class PersistenceMixin:
                 f"Install the required package and retry: {exc}"
             ) from exc
         except Exception as exc:
+            hint = _gpu_state_hint(exc, path)
+            if hint:
+                raise RuntimeError(hint) from exc
             raise RuntimeError(
                 f"Failed to load learner from {path}. The file may be "
                 f"corrupt or was not created by save_learner(): {exc}"

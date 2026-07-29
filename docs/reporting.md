@@ -170,6 +170,12 @@ learner = load_learner('analysis.pkl')
 learner.predict(new_data, models='coxph')
 ```
 
+Saved files are portable across machines, including between GPU and CPU hosts.
+DeepSurv and DeepHit weights are written as CPU state and moved back onto a GPU
+at load time when one is available. If a model was trained with an explicit
+`device='cuda'` and you load it somewhere without CUDA, it loads onto the CPU and
+warns, so predictions still work.
+
 ### Model Artifacts
 
 For deployment scenarios, `save_artifact()` exports a lightweight model pipeline with metadata:
