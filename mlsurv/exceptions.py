@@ -31,6 +31,7 @@ See ``docs/warnings.md`` for the full filtering guide.
 
 from mlsurv._warnings import (
     ClampWarning,
+    ExportSplitWarning,
     FitFailureWarning,
     InternalWarning,
     IterativeWarning,
@@ -47,6 +48,7 @@ __all__ = [
     "InternalWarning",
     "IterativeWarning",
     "ClampWarning",
+    "ExportSplitWarning",
     "FitFailureWarning",
     "MetricFailureWarning",
     "SmallSubpopulationWarning",

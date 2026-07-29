@@ -43,6 +43,14 @@ model.overflow_detected_   # True if the fallback engaged
 model.alpha_               # the penalty it settled on
 ```
 
+`ExportSplitWarning` is a `SuggestionWarning` that fires on every export whose
+output is not all where you asked for it — result tables too large for a
+worksheet, or files an earlier export left in the same directory — rather than
+once per session. Each one describes where a particular run put its files, so
+deduplicating them would hide the second export's layout behind the first one's.
+Silencing the `SuggestionWarning` tier silences these too; the `_large_tables`
+sheet inside the workbook always records the split.
+
 ## Recipes
 
 Silence one tier (keep the rest):

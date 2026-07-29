@@ -128,6 +128,35 @@ learner.export_results('results_dir', format='csv')     # directory of CSVs, one
 
 The Excel workbook contains separate sheets for concordance metrics, bootstrap summaries, feature importance, subpopulation results, and validation metrics.
 
+Save the learner first. Exporting is cheap to redo; refitting the models is not:
+
+```python
+learner.save_learner('analysis.pkl')
+learner.export_results('results.xlsx')
+```
+
+### Sheet Names and Excel Limits
+
+Excel has three hard limits: sheet-name length, rows per sheet, and columns per sheet.
+
+**31 characters per sheet name.** Longer keys are truncated, and `\ / * ? [ ] :` are replaced with `_`. mlsurv warns once per export with a summary of what was renamed. Pass `audit=True` (or set `MLSURV_EXPORT_AUDIT=1`) to print the full `{original: truncated}` map, which is what you want when a downstream script reads sheets by name:
+
+```python
+learner.export_results('results.xlsx', audit=True)
+```
+
+**1,048,576 rows per sheet** (one of them the header, so 1,048,575 rows of data) **and 16,384 columns.** A table past either limit cannot be a worksheet at all, so mlsurv writes it as CSV in a sibling `<stem>_large_tables` directory, records it in a `_large_tables` sheet listing the table, the reason, and the file, and warns. The workbook is still written and nothing is raised, so a batch run keeps its clean exit:
+
+```
+results.xlsx                 # every table that fits, plus the _large_tables index
+results_large_tables/
+    eval_bootstrap_predictions.csv
+```
+
+mlsurv never deletes files it did not create, so if a re-export produces a different set of tables it warns about the CSVs the previous run left rather than removing them. The `_large_tables` sheet is the authority on which files belong to the workbook beside it.
+
+The table that normally grows this large is `eval_bootstrap_predictions` (and its `val_<cohort>_` twin), which holds one row per model x bootstrap iteration x resampled sample. `run(bootstrap=True)`, `evaluate(bootstrap=True)`, and `benchmark(bootstrap=True)` all store per-iteration predictions; calling `bootstrap()` directly stores them only with `include_predictions=True`. Exporting with `format='csv'` sidesteps all three limits and keeps every table in one place.
+
 ### Session Serialization
 
 `save_learner()` serializes the full analysis state for later reproduction:

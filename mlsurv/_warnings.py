@@ -40,6 +40,17 @@ class SuggestionWarning(UserWarning):
     """
 
 
+class ExportSplitWarning(SuggestionWarning):
+    """An export's output is not all where the caller asked for it.
+
+    Covers tables written as CSV beside the workbook because they exceed
+    Excel's worksheet limits, and files an earlier export left in the same
+    directory. Fires every time rather than once per session: the message
+    describes what a particular run put where, so suppressing repeats would
+    hide the second export's layout behind the first one's.
+    """
+
+
 class InternalWarning(UserWarning):
     """Internal fallback or diagnostic detail.
 
@@ -114,7 +125,7 @@ class RegressionModeWarning(MethodologicalWarning, IterativeWarning):
 _WARNING_CLASSES = {cls.__name__: cls for cls in (
     MethodologicalWarning, SuggestionWarning, InternalWarning,
     ClampWarning, FitFailureWarning, MetricFailureWarning, SmallSubpopulationWarning,
-    RegressionModeWarning,
+    RegressionModeWarning, ExportSplitWarning,
 )}
 
 # Base tiers that identify a warning as mlsurv's own. Every concrete mlsurv
@@ -167,6 +178,9 @@ def configure_default_filters():
     """
     warnings.simplefilter("once", IterativeWarning)
     warnings.simplefilter("once", SuggestionWarning)
+    # Registered after the SuggestionWarning filter so the more specific
+    # category wins: each export that splits its output must say so.
+    warnings.simplefilter("always", ExportSplitWarning)
     warnings.simplefilter("ignore", InternalWarning)
     warnings.formatwarning = _mlsurv_formatwarning
 

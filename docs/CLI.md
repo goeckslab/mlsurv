@@ -624,6 +624,11 @@ Key flags:
 - `--format` -- xlsx or csv (default: inferred from the output extension)
 - `--audit` -- Include the full sheet-name truncation mapping (xlsx only)
 
+For xlsx, a table too large for one worksheet (over 1,048,575 rows of data or
+16,384 columns) is written as CSV in a sibling `<stem>_large_tables/` directory
+and listed in a `_large_tables` sheet rather than failing the export. See
+[Sheet Names and Excel Limits](reporting.md#sheet-names-and-excel-limits).
+
 ## Persistence: Artifacts vs. Learners
 
 mlsurv offers two persistence mechanisms with different trade-offs:

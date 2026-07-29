@@ -28,7 +28,7 @@ OWNERS = {
     ],
     ExportMixin: [
         'export_results', '_collect_all_dataframes', '_truncate_sheet_names',
-        '_write_xlsx', '_write_csv_dir',
+        '_write_xlsx', '_offload_oversized', '_write_csv_dir',
     ],
     TrainingMixin: [
         '_check_cv_vs_holdout_best', '_print_comparison_table',
@@ -43,6 +43,7 @@ HELPER_HOMES = {
     _export: [
         '_audit_env_enabled', '_collect_model_eval_dfs',
         '_resolve_paired_bootstrap', '_INVALID_SHEET_CHARS',
+        '_oversize_reason', '_csv_filenames', '_sidecar_dir', '_warn_stale_csvs',
     ],
 }
 

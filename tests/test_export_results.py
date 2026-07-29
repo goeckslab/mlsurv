@@ -7,7 +7,11 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from mlsurv._warnings import InternalWarning, SuggestionWarning
+from mlsurv._warnings import (
+    ExportSplitWarning,
+    InternalWarning,
+    SuggestionWarning,
+)
 from mlsurv.results.containers import (
     BenchmarkResult,
     BootstrapResult,
@@ -797,6 +801,442 @@ class TestSheetNameTruncation:
                 pd.DataFrame({'key': ['d'], 'description': ['x']}),
             )
         assert out.exists()
+
+
+class TestOversizedTableOffload:
+    """Tables past Excel's worksheet limits go to CSV instead of raising.
+
+    The limits are patched down to single digits rather than building real
+    million-row frames.
+    """
+
+    DATA_DICT = pd.DataFrame({'key': ['d'], 'description': ['x']})
+
+    def test_constants_match_excel(self):
+        """Every other test patches the limits away, so pin the real values."""
+        from mlsurv.learner._export import _XLSX_MAX_COLS, _XLSX_MAX_ROWS
+
+        assert (_XLSX_MAX_ROWS, _XLSX_MAX_COLS) == (1_048_576, 16_384)
+
+    @pytest.fixture
+    def small_limits(self, monkeypatch):
+        """Shrink both Excel limits so tiny frames count as oversized."""
+        from mlsurv.learner import _export
+
+        monkeypatch.setattr(_export, '_XLSX_MAX_ROWS', 5)
+        monkeypatch.setattr(_export, '_XLSX_MAX_COLS', 4)
+
+    @staticmethod
+    def _write(out, dataframes):
+        """Call _write_xlsx with the truncation warning silenced."""
+        from mlsurv.learner._export import ExportMixin
+
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            return ExportMixin._write_xlsx(
+                out, dataframes, TestOversizedTableOffload.DATA_DICT,
+            )
+
+    def test_too_many_rows_offloaded_to_csv(self, small_limits, tmp_path):
+        # 5 rows + 1 header = 6 > _XLSX_MAX_ROWS (5)
+        big = pd.DataFrame({'a': range(5), 'b': range(5)})
+        out = tmp_path / 'results.xlsx'
+
+        offloaded = self._write(out, {'fits': pd.DataFrame({'v': [1]}), 'big': big})
+
+        assert set(offloaded) == {'big'}
+        csv_path = offloaded['big']
+        assert csv_path == tmp_path / 'results_large_tables' / 'big.csv'
+        pd.testing.assert_frame_equal(pd.read_csv(csv_path), big)
+
+        sheets = pd.ExcelFile(out).sheet_names
+        assert 'big' not in sheets
+        assert 'fits' in sheets
+
+    def test_too_many_columns_offloaded_to_csv(self, small_limits, tmp_path):
+        wide = pd.DataFrame({f't_{i}': [0.9] for i in range(5)})
+        out = tmp_path / 'results.xlsx'
+
+        offloaded = self._write(out, {'wide': wide})
+
+        assert set(offloaded) == {'wide'}
+        pd.testing.assert_frame_equal(pd.read_csv(offloaded['wide']), wide)
+        assert 'wide' not in pd.ExcelFile(out).sheet_names
+
+    def test_index_sheet_lists_every_offloaded_table(self, small_limits, tmp_path):
+        out = tmp_path / 'results.xlsx'
+        offloaded = self._write(out, {
+            'tall': pd.DataFrame({'a': range(5)}),
+            'wide': pd.DataFrame({f'c{i}': [1] for i in range(5)}),
+        })
+
+        index = pd.read_excel(out, sheet_name='_large_tables')
+        assert list(index.columns) == ['table', 'reason', 'file']
+        assert set(index['table']) == set(offloaded)
+        assert set(index['file']) == {
+            'results_large_tables/tall.csv', 'results_large_tables/wide.csv',
+        }
+        reasons = dict(zip(index['table'], index['reason']))
+        assert 'rows' in reasons['tall']
+        assert 'columns' in reasons['wide']
+
+    @pytest.mark.parametrize('n_rows, expect_offload', [(4, False), (5, True)])
+    def test_row_limit_boundary(self, small_limits, tmp_path, n_rows, expect_offload):
+        """With the limit at 5, 4 data rows + header fill it exactly; 5 spill."""
+        out = tmp_path / f'results_{n_rows}.xlsx'
+        offloaded = self._write(out, {'edge': pd.DataFrame({'a': range(n_rows)})})
+
+        assert bool(offloaded) is expect_offload
+        assert ('edge' in pd.ExcelFile(out).sheet_names) is not expect_offload
+
+    @pytest.mark.parametrize('n_cols, expect_offload', [(4, False), (5, True)])
+    def test_column_limit_boundary(self, small_limits, tmp_path, n_cols, expect_offload):
+        """No header allowance on columns: the limit is the column count."""
+        out = tmp_path / f'results_{n_cols}.xlsx'
+        df = pd.DataFrame({f'c{i}': [1] for i in range(n_cols)})
+        offloaded = self._write(out, {'edge': df})
+
+        assert bool(offloaded) is expect_offload
+
+    def test_nothing_oversized_leaves_no_trace(self, tmp_path):
+        """Default limits: no sidecar directory, no index sheet, no warning."""
+        out = tmp_path / 'results.xlsx'
+        with warnings.catch_warnings(record=True) as record:
+            warnings.simplefilter('always', SuggestionWarning)
+            offloaded = self._write(out, {'a': pd.DataFrame({'v': [1]})})
+
+        assert offloaded == {}
+        assert list(tmp_path.iterdir()) == [out]
+        assert pd.ExcelFile(out).sheet_names == ['_data_dictionary', 'a']
+        assert record == []
+
+    def test_offload_warns_with_actionable_guidance(self, small_limits, tmp_path):
+        from mlsurv.learner._export import ExportMixin
+
+        with warnings.catch_warnings(record=True) as record:
+            warnings.simplefilter('always')
+            ExportMixin._write_xlsx(
+                tmp_path / 'results.xlsx',
+                {'big': pd.DataFrame({'a': range(5)})},
+                self.DATA_DICT,
+            )
+
+        offload_warnings = [w for w in record
+                            if issubclass(w.category, ExportSplitWarning)]
+        assert len(offload_warnings) == 1
+        # ExportSplitWarning is a SuggestionWarning, so an existing filter on
+        # the tier still catches it.
+        assert issubclass(offload_warnings[0].category, SuggestionWarning)
+        msg = str(offload_warnings[0].message)
+        assert str(tmp_path / 'results_large_tables') in msg
+        assert 'results.xlsx' in msg
+        assert "format='csv'" in msg
+        assert "'big'" in msg
+
+    def test_every_split_export_warns(self, small_limits, tmp_path):
+        """`once` on SuggestionWarning must not hide the second export."""
+        from mlsurv.learner._export import ExportMixin
+        from mlsurv._warnings import configure_default_filters
+
+        big = pd.DataFrame({'a': range(5)})
+        with warnings.catch_warnings(record=True) as record:
+            configure_default_filters()
+            for _ in range(2):
+                ExportMixin._write_xlsx(
+                    tmp_path / 'results.xlsx', {'big': big}, self.DATA_DICT,
+                )
+
+        assert len([w for w in record
+                    if issubclass(w.category, ExportSplitWarning)]) == 2
+
+    def test_reports_both_dimensions_when_both_over(self, small_limits, tmp_path):
+        """Shrinking rows should not just uncover a column problem."""
+        tall_and_wide = pd.DataFrame({f'c{i}': range(5) for i in range(5)})
+        out = tmp_path / 'results.xlsx'
+
+        self._write(out, {'both': tall_and_wide})
+
+        reason = pd.read_excel(out, sheet_name='_large_tables')['reason'].iloc[0]
+        assert 'rows' in reason and 'columns' in reason
+
+    @pytest.mark.parametrize('key, expected', [
+        ('val_A/B:C_bootstrap_predictions', 'val_A_B_C_bootstrap_predictions.csv'),
+        # < > " | are legal in a sheet name but not in a Windows filename.
+        ('subpopulation_PD-L1 >1%_cohort', 'subpopulation_PD-L1 _1%_cohort.csv'),
+        ('subpopulation_Stage III|IV_cohort', 'subpopulation_Stage III_IV_cohort.csv'),
+    ])
+    def test_offload_filename_is_sanitized(
+        self, small_limits, tmp_path, key, expected,
+    ):
+        """Keys embed user-supplied names, which can carry path characters."""
+        offloaded = self._write(
+            tmp_path / 'results.xlsx', {key: pd.DataFrame({'a': range(5)})},
+        )
+
+        assert offloaded[key].name == expected
+        assert offloaded[key].exists()
+
+    def test_offload_filename_collision_keeps_both_tables(
+        self, small_limits, tmp_path,
+    ):
+        """Sanitizing is lossy, so two keys can want the same filename."""
+        a, b = 'subpopulation_T/N_cohort', 'subpopulation_T_N_cohort'
+        offloaded = self._write(tmp_path / 'results.xlsx', {
+            a: pd.DataFrame({'v': [1] * 5}),
+            b: pd.DataFrame({'v': [2] * 5}),
+        })
+
+        assert offloaded[a] != offloaded[b]
+        assert pd.read_csv(offloaded[a])['v'].iloc[0] == 1
+        assert pd.read_csv(offloaded[b])['v'].iloc[0] == 2
+
+        index = pd.read_excel(tmp_path / 'results.xlsx', sheet_name='_large_tables')
+        assert index['file'].nunique() == 2
+
+    def test_offloaded_key_does_not_trigger_truncation_warning(
+        self, small_limits, tmp_path,
+    ):
+        """A long key that never becomes a sheet has no name to truncate."""
+        from mlsurv.learner._export import ExportMixin
+
+        with warnings.catch_warnings(record=True) as record:
+            warnings.simplefilter('always')
+            ExportMixin._write_xlsx(
+                tmp_path / 'results.xlsx',
+                {'val_a_very_long_cohort_name_bootstrap_predictions':
+                    pd.DataFrame({'a': range(5)})},
+                self.DATA_DICT,
+            )
+
+        assert not [w for w in record if '31-char' in str(w.message)]
+
+    @staticmethod
+    def _stale_warnings(record):
+        return [w for w in record
+                if issubclass(w.category, ExportSplitWarning)
+                and 'did not write' in str(w.message)]
+
+    def test_reexport_warns_about_leftover_csvs(self, small_limits, tmp_path):
+        """A table that no longer offloads leaves a CSV nothing points at."""
+        from mlsurv.learner._export import ExportMixin
+
+        out = tmp_path / 'results.xlsx'
+        sidecar = tmp_path / 'results_large_tables'
+        self._write(out, {'big': pd.DataFrame({'a': range(5)})})
+        assert (sidecar / 'big.csv').exists()
+
+        # Same path, nothing oversized this time.
+        with warnings.catch_warnings(record=True) as record:
+            warnings.simplefilter('always')
+            ExportMixin._write_xlsx(
+                out, {'big': pd.DataFrame({'a': [1]})}, self.DATA_DICT,
+            )
+
+        stale = self._stale_warnings(record)
+        assert len(stale) == 1, [str(w.message) for w in record]
+        assert 'big.csv' in str(stale[0].message)
+        # Warned, not deleted: mlsurv cannot tell its leftovers from user files.
+        assert (sidecar / 'big.csv').exists()
+        assert 'big' in pd.ExcelFile(out).sheet_names
+
+    def test_files_mlsurv_did_not_write_are_never_deleted(
+        self, small_limits, tmp_path,
+    ):
+        """The directory name is not proof of ownership."""
+        from mlsurv.learner._export import ExportMixin
+
+        sidecar = tmp_path / 'results_large_tables'
+        sidecar.mkdir()
+        (sidecar / 'my_own_notes.csv').write_text('mine\n')
+        (sidecar / 'keep.txt').write_text('also mine\n')
+
+        with warnings.catch_warnings(record=True) as record:
+            warnings.simplefilter('always')
+            ExportMixin._write_xlsx(
+                tmp_path / 'results.xlsx',
+                {'small': pd.DataFrame({'a': [1]})},
+                self.DATA_DICT,
+            )
+
+        assert (sidecar / 'my_own_notes.csv').read_text() == 'mine\n'
+        assert (sidecar / 'keep.txt').exists()
+        assert len(self._stale_warnings(record)) == 1
+
+    def test_failed_workbook_write_leaves_earlier_export_intact(
+        self, small_limits, tmp_path,
+    ):
+        """A locked workbook must not cost the user the previous run's data."""
+        import stat
+
+        from mlsurv.learner._export import ExportMixin
+
+        out = tmp_path / 'results.xlsx'
+        sidecar = tmp_path / 'results_large_tables'
+        self._write(out, {'big': pd.DataFrame({'a': range(5)})})
+        first = (sidecar / 'big.csv').read_text()
+
+        out.chmod(stat.S_IREAD)
+        try:
+            with pytest.raises(PermissionError):
+                with warnings.catch_warnings():
+                    warnings.simplefilter('ignore')
+                    ExportMixin._write_xlsx(
+                        out, {'big': pd.DataFrame({'a': [1]})}, self.DATA_DICT,
+                    )
+        finally:
+            out.chmod(stat.S_IWRITE | stat.S_IREAD)
+
+        assert (sidecar / 'big.csv').read_text() == first
+
+    def test_sidecar_path_blocked_by_a_file_explains_itself(
+        self, small_limits, tmp_path,
+    ):
+        """A leftover file where the directory goes must not raise a bare WinError."""
+        from mlsurv.learner._export import ExportMixin
+
+        (tmp_path / 'results_large_tables').write_text('not a directory')
+
+        with pytest.raises(OSError, match='too large for a worksheet'):
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore')
+                ExportMixin._write_xlsx(
+                    tmp_path / 'results.xlsx',
+                    {'big': pd.DataFrame({'a': range(5)})},
+                    self.DATA_DICT,
+                )
+
+    def test_export_results_still_returns_workbook_path(
+        self, small_limits, tmp_path, fake_learner,
+    ):
+        """The public contract is unchanged: one path back, no exception."""
+        mr = ModelResult(
+            name='rsf', model=None,
+            cv_metric_scores=np.array([0.70, 0.72, 0.74, 0.71, 0.73, 0.69]),
+            cv_metric_mean=0.72, cv_metric_std=0.02,
+        )
+        fake_learner._state.models['rsf'] = mr
+        out = tmp_path / 'results.xlsx'
+
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            returned = fake_learner.export_results(out, format='xlsx')
+
+        assert returned == str(out.resolve())
+        # cv_scores has one row per fold, so 6 folds trip the patched row
+        # limit, and an offloaded table is still documented in the dictionary.
+        assert (tmp_path / 'results_large_tables' / 'cv_scores.csv').exists()
+        index = pd.read_excel(out, sheet_name='_large_tables')
+        assert index.loc[index['table'] == 'cv_scores', 'reason'].iloc[0] == (
+            '6 rows (max 4)'
+        )
+        data_dict = pd.read_excel(out, sheet_name='_data_dictionary')
+        assert 'cv_scores' in set(data_dict['table'])
+
+
+class TestCsvDirFilenames:
+    """format='csv' filenames must survive keys with path characters."""
+
+    DATA_DICT = pd.DataFrame({'key': ['d'], 'description': ['x']})
+
+    def test_invalid_chars_sanitized(self, tmp_path):
+        from mlsurv.learner._export import ExportMixin
+
+        ExportMixin._write_csv_dir(
+            tmp_path,
+            {'subpopulation_Stage:T_cohort': pd.DataFrame({'a': [1]})},
+            self.DATA_DICT,
+        )
+
+        assert sorted(p.name for p in tmp_path.iterdir()) == [
+            '_data_dictionary.csv', 'subpopulation_Stage_T_cohort.csv',
+        ]
+
+    def test_collision_keeps_both_tables(self, tmp_path):
+        """Two keys that sanitize to the same name must not overwrite."""
+        from mlsurv.learner._export import ExportMixin
+
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            ExportMixin._write_csv_dir(
+                tmp_path,
+                {
+                    'subpopulation_T/N_cohort': pd.DataFrame({'v': [1]}),
+                    'subpopulation_T_N_cohort': pd.DataFrame({'v': [2]}),
+                },
+                self.DATA_DICT,
+            )
+
+        written = sorted(p for p in tmp_path.iterdir()
+                         if p.name != '_data_dictionary.csv')
+        assert len(written) == 2, [p.name for p in written]
+        assert {pd.read_csv(p)['v'].iloc[0] for p in written} == {1, 2}
+
+    def test_rename_warns(self, tmp_path):
+        """A consumer building a path from the key needs to know it moved."""
+        from mlsurv.learner._export import ExportMixin
+
+        with warnings.catch_warnings(record=True) as record:
+            warnings.simplefilter('always', SuggestionWarning)
+            ExportMixin._write_csv_dir(
+                tmp_path,
+                {'subpopulation_Stage:T_cohort': pd.DataFrame({'a': [1]})},
+                self.DATA_DICT,
+            )
+
+        messages = [str(w.message) for w in record]
+        assert any('different filename' in m for m in messages), messages
+
+    def test_stale_csv_from_earlier_export_warns(self, tmp_path):
+        """The csv directory is the whole output, so leftovers mislead more."""
+        from mlsurv.learner._export import ExportMixin
+
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            ExportMixin._write_csv_dir(
+                tmp_path,
+                {'cv_scores': pd.DataFrame({'a': [1]}),
+                 'eval_old': pd.DataFrame({'a': [9]})},
+                self.DATA_DICT,
+            )
+
+        with warnings.catch_warnings(record=True) as record:
+            warnings.simplefilter('always')
+            ExportMixin._write_csv_dir(
+                tmp_path, {'cv_scores': pd.DataFrame({'a': [2]})}, self.DATA_DICT,
+            )
+
+        messages = [str(w.message) for w in record if 'did not write' in str(w.message)]
+        assert len(messages) == 1, [str(w.message) for w in record]
+        assert 'eval_old.csv' in messages[0]
+        assert (tmp_path / 'eval_old.csv').exists()
+
+    def test_clean_keys_do_not_warn(self, tmp_path):
+        from mlsurv.learner._export import ExportMixin
+
+        with warnings.catch_warnings(record=True) as record:
+            warnings.simplefilter('always', SuggestionWarning)
+            ExportMixin._write_csv_dir(
+                tmp_path, {'cv_scores': pd.DataFrame({'a': [1]})}, self.DATA_DICT,
+            )
+
+        assert record == []
+
+    def test_data_dictionary_name_is_reserved(self, tmp_path):
+        """A table keyed '_data_dictionary' must not clobber the real one."""
+        from mlsurv.learner._export import ExportMixin
+
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            ExportMixin._write_csv_dir(
+                tmp_path,
+                {'_data_dictionary': pd.DataFrame({'v': [99]})},
+                self.DATA_DICT,
+            )
+
+        assert list(pd.read_csv(tmp_path / '_data_dictionary.csv').columns) == [
+            'key', 'description',
+        ]
+        assert pd.read_csv(tmp_path / '_data_dictionary_2.csv')['v'].iloc[0] == 99
 
 
 class TestCollectAllDataframes:

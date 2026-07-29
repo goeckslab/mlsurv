@@ -29,7 +29,7 @@ dataclass wins — fix this doc.
 | `_config.py` | `ConfigMixin` | `config` *(property)* — the current-configuration snapshot; module-level helpers `_groups_display_label`, `_str_or_none` |
 | `_persistence.py` | `PersistenceMixin` | `save_artifact`, `load_artifact`, `_update_artifact_path`, `save_learner`, `load_learner`; module-level `_environment_fingerprint()` + `_ArtifactEncoder` |
 | `_studies.py` | `StudyMixin` | `experiment_path` *(property)*, `list_studies`, `export_study`, `reload_study`; module-level `_resolve_tuned_model` |
-| `_export.py` | `ExportMixin` | `export_results`, `_collect_all_dataframes`, `_truncate_sheet_names`, `_write_xlsx`, `_write_csv_dir`; module-level `_collect_*`/`_build_*` table collectors |
+| `_export.py` | `ExportMixin` | `export_results`, `_collect_all_dataframes`, `_truncate_sheet_names`, `_write_xlsx`, `_offload_oversized`, `_write_csv_dir`; module-level `_collect_*`/`_build_*` table collectors, `_oversize_reason`, `_csv_filenames`, `_sidecar_dir`, `_warn_stale_csvs` |
 | `_reports.py` | `ReportMixin` | `generate_report`, `_gather_report_data` |
 | `_prediction.py` | `PredictionMixin` | `predict` *(multi-model: dict of per-model results for collection selections)*, `_predict_single` *(per-model worker)*, `_validate_predict_input`, `_run_prediction_bootstrap`, `_attach_cohort_context` |
 | `_explain.py` | `ExplainMixin` | `explain` |
