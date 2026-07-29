@@ -1,5 +1,7 @@
 """Test model wrappers for Phase 2."""
 
+import warnings
+
 import pytest
 import numpy as np
 import pandas as pd
@@ -132,6 +134,196 @@ class TestHazardRatioValidFlag:
         for cls in (CoxNetModel, FSSVMModel, RSFModel,
                     WeibullAFTModel, BaseSurvivalModel):
             assert cls.hazard_ratio_valid is False, cls.__name__
+
+
+class _StubCoxPH:
+    """The attributes _add_coxph_details reads, without fitting anything.
+
+    Rendering is keyed on the recorded outcome, so a stub covers the state
+    combinations far more cheaply than provoking each one from a real solver.
+    ``test_real_fitted_model_renders_its_recorded_state`` keeps the stub
+    honest: a rename on CoxPHModel would leave every stub test green while
+    real reports silently degraded to "status not recorded".
+    """
+
+    def __init__(self, converged=True, overflow=False, alpha_=0, alpha=0,
+                 unstable_kept=False, hr_suppressed_reason_=None):
+        self.converged_ = converged
+        self.overflow_detected_ = overflow
+        self.alpha_ = alpha_
+        self.alpha = alpha
+        self.unstable_fit_kept_ = unstable_kept
+        self.hr_suppressed_reason_ = hr_suppressed_reason_
+
+
+def _render_coxph_details(model):
+    """Render one model's CoxPH detail block to a single string."""
+    from mlsurv.reports.sections._trained_details import _TrainedDetailsSubsection
+
+    md_lines: list = []
+    _TrainedDetailsSubsection(section=None)._add_coxph_details(md_lines, model)
+    return "\n".join(md_lines)
+
+
+class TestCoxPHTrainedDetails:
+    """_add_coxph_details must not claim more than the model recorded."""
+
+    def test_clean_fit_reports_convergence(self):
+        assert "converged normally" in _render_coxph_details(_StubCoxPH())
+
+    def test_overflow_reports_the_penalty_it_settled_on(self):
+        rendered = _render_coxph_details(
+            _StubCoxPH(overflow=True, alpha=0, alpha_=0.1)
+        )
+
+        assert "Overflow detected" in rendered
+        assert "Penalizer alpha=0.1 was applied" in rendered
+
+    def test_no_penalizer_is_claimed_when_none_was_applied(self):
+        """force=True kept an unpenalized fit, so alpha_ stays 0.
+
+        "penalizer alpha=0 was applied" is not just useless, it is false: 0 is
+        the unregularized fit. It would also replace the real caveat (the
+        unstable fit was kept) with a reassurance that it was handled.
+        """
+        rendered = _render_coxph_details(
+            _StubCoxPH(overflow=True, alpha=0, alpha_=0)
+        )
+
+        assert "was applied" not in rendered
+        assert "kept rather than penalized" in rendered
+        assert "may be unreliable" in rendered
+
+    def test_a_user_penalty_is_not_described_as_no_penalty(self):
+        """alpha_ == alpha here because no penalty was added ON TOP.
+
+        The fit was penalized, at the user's own alpha. Saying it was "kept
+        rather than penalized" would contradict the hazard-ratio line in the
+        same block, which names that alpha.
+        """
+        rendered = _render_coxph_details(
+            _StubCoxPH(overflow=True, alpha=2.0, alpha_=2.0)
+        )
+
+        assert "kept rather than penalized" not in rendered
+        assert "No penalty was added on top of the alpha=2 you passed" in rendered
+        assert "may be unreliable" in rendered
+
+    def test_penalty_that_did_not_resolve_instability_says_so(self):
+        """A penalizer was added, so naming it is right; stopping there is not.
+
+        Without the second sentence this renders identically to a clean
+        escalation, while the console said probabilities may be unreliable.
+        """
+        rendered = _render_coxph_details(_StubCoxPH(
+            overflow=True, alpha=0, alpha_=0.1, unstable_kept=True
+        ))
+
+        assert "Penalizer alpha=0.1 was applied" in rendered
+        assert "remained unstable even so" in rendered
+
+    def test_resolved_instability_does_not_warn_about_probabilities(self):
+        """The successful escalation, which is the common case."""
+        rendered = _render_coxph_details(
+            _StubCoxPH(overflow=True, alpha=0, alpha_=0.01)
+        )
+
+        assert "Penalizer alpha=0.01 was applied" in rendered
+        assert "unreliable" not in rendered
+
+    def test_failed_convergence_is_not_reported_as_converged(self):
+        """The regression: overflow is False, so the old code claimed success.
+
+        fit() warns "did not converge" on this path, which left the console
+        and the report contradicting each other about the same run.
+        """
+        rendered = _render_coxph_details(_StubCoxPH(converged=False))
+
+        assert "did not converge" in rendered
+        assert "converged normally" not in rendered
+
+    def test_failed_convergence_with_overflow_reports_both(self):
+        """The two are independent, so one must not mask the other."""
+        rendered = _render_coxph_details(
+            _StubCoxPH(converged=False, overflow=True, alpha=0, alpha_=1.0)
+        )
+
+        assert "did not converge" in rendered
+        assert "Penalizer alpha=1 was applied" in rendered
+
+    def test_worst_case_model_carries_every_caveat(self):
+        """Unreliable coefficients, a penalty, and no hazard ratios at once.
+
+        Each caveat is rendered by a different branch, so this pins that none
+        of them swallows another in the state a reader most needs warned about.
+        """
+        rendered = _render_coxph_details(_StubCoxPH(
+            converged=False, overflow=True, alpha=0, alpha_=0.1,
+            hr_suppressed_reason_="Suppressed. The fit needed alpha=0.1.",
+        ))
+
+        assert "did not converge" in rendered
+        assert "Penalizer alpha=0.1 was applied" in rendered
+        assert "**Hazard ratios:** Suppressed." in rendered
+
+    def test_unrecorded_convergence_claims_nothing(self):
+        """A model pickled before converged_ existed knows nothing either way.
+
+        Falling back to "converged normally" here would reintroduce exactly
+        the inference this fix removed.
+        """
+        model = _StubCoxPH()
+        del model.converged_
+
+        rendered = _render_coxph_details(model)
+        assert "not recorded" in rendered
+        assert "converged normally" not in rendered
+
+    def test_suppression_reason_is_rendered(self):
+        """The renderer prints whatever reason the model recorded.
+
+        Being route-agnostic is the point: neither suppression route needs its
+        own branch here, so a third one would be covered without a change.
+        """
+        rendered = _render_coxph_details(
+            _StubCoxPH(hr_suppressed_reason_="Suppressed. You passed alpha=0.1.")
+        )
+
+        assert "**Hazard ratios:** Suppressed. You passed alpha=0.1." in rendered
+
+    def test_no_suppression_line_when_no_reason_was_recorded(self):
+        assert "Hazard ratios" not in _render_coxph_details(_StubCoxPH())
+
+    def test_real_fitted_model_renders_its_recorded_state(self, train_test_data):
+        """Bind the stub tests to the real class.
+
+        Every other test here uses a hand-maintained stub. If converged_ were
+        renamed on CoxPHModel, or _unwrap_pipeline started handing over the
+        sksurv estimator instead of the wrapper, all of them would stay green
+        while real reports silently fell back to "status not recorded".
+        """
+        from mlsurv.models import CoxPHModel
+
+        X_train, _, y_train, _ = train_test_data
+        model = CoxPHModel(alpha=0).fit(X_train, y_train)
+
+        rendered = _render_coxph_details(model)
+        assert "converged normally" in rendered
+        assert "not recorded" not in rendered
+        assert "Hazard ratios" not in rendered
+
+    def test_real_penalized_model_explains_the_suppression(self, train_test_data):
+        """The end-to-end path for the gap this fix closes."""
+        from mlsurv.models import CoxPHModel
+
+        X_train, _, y_train, _ = train_test_data
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            model = CoxPHModel(alpha=0.1).fit(X_train, y_train)
+
+        rendered = _render_coxph_details(model)
+        assert "**Hazard ratios:**" in rendered
+        assert "alpha=0.1" in rendered
 
 
 class TestWeibullAFTCoefficients:

@@ -138,13 +138,65 @@ class _TrainedDetailsSubsection:
         """CoxPH: convergence info."""
         overflow = getattr(model, 'overflow_detected_', False)
         alpha = getattr(model, 'alpha_', None)
-        if overflow:
-            md_lines.append(
-                "**Convergence:** Overflow detected during fitting; "
-                f"penalizer alpha={alpha} was applied for numerical stability."
+        # See CoxPHModel.converged_: None is "not known", not "did not
+        # converge", so each of the three states gets its own wording rather
+        # than being inferred from the absence of overflow.
+        converged = getattr(model, 'converged_', None)
+
+        # Only claim a penalizer when one was actually added. On the force=True
+        # and no-stronger-rung paths the ladder never runs, so alpha_ is still
+        # the user's own alpha and the unstable fit was kept as-is. Saying
+        # "penalizer alpha=0 was applied" there would report the opposite of
+        # what happened.
+        user_alpha = getattr(model, 'alpha', None)
+        escalated = (alpha is not None and user_alpha is not None
+                     and alpha > user_alpha)
+        if escalated:
+            instability = (
+                f" Penalizer alpha={alpha:g} was applied for numerical "
+                f"stability."
+            )
+            # A penalty was added and the fit was still unstable at it, so
+            # the sentence above must not be left reading as a resolution.
+            if getattr(model, 'unstable_fit_kept_', False):
+                instability += (
+                    " The fit remained unstable even so, so survival "
+                    "probabilities may be unreliable."
+                )
+        elif user_alpha:
+            # The fit was penalized, just not further. Saying it was "kept
+            # rather than penalized" would contradict the hazard-ratio line
+            # below, which correctly names the alpha the user passed.
+            instability = (
+                f" No penalty was added on top of the alpha={user_alpha:g} you "
+                f"passed, so the C-index is valid but survival probabilities "
+                f"may be unreliable."
             )
         else:
-            md_lines.append("**Convergence:** Model converged normally.")
+            instability = (
+                " The original fit was kept rather than penalized, so the "
+                "C-index is valid but survival probabilities may be "
+                "unreliable."
+            )
+
+        if converged is False:
+            line = (
+                "**Convergence:** Optimizer did not converge within the "
+                "solver's iteration limit; coefficients may be unreliable."
+            ) + (instability if overflow else "")
+        elif overflow:
+            line = (
+                "**Convergence:** Overflow detected during fitting."
+                + instability
+            )
+        elif converged is True:
+            line = "**Convergence:** Model converged normally."
+        else:
+            line = (
+                "**Convergence:** Model fitted; convergence status was not "
+                "recorded for this model."
+            )
+        md_lines.append(line)
         # Say why the hazard-ratio table and forest plot are missing. The
         # warning that explains it fires at fit time, long before the report is
         # written, so without this the section is just an unexplained gap.

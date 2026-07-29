@@ -39,9 +39,31 @@ know which cohorts were affected, don't count lines. Ask each model:
 
 ```python
 model = learner.models['coxph'].model.named_steps['model']
-model.overflow_detected_   # True if the fallback engaged
-model.alpha_               # the penalty it settled on
+model.overflow_detected_      # True if numerical instability was detected
+model.alpha_                  # the penalty it settled on
+model.unstable_fit_kept_      # True if nothing resolved that instability
+model.converged_              # False if the optimizer ran out of iterations
+model.hr_suppressed_reason_   # why hazard ratios are missing, or None
 ```
+
+`overflow_detected_` says instability was *seen*; `unstable_fit_kept_` says
+whether the fit you got is still affected by it. They differ whenever the
+fallback escalated successfully (seen, then resolved), which is the common
+case, so read the second one before deciding whether to trust the survival
+probabilities.
+
+`converged_` is tracked separately from `overflow_detected_` on purpose: a fit
+can converge and still need a penalty, or hit the iteration limit with no
+overflow at all. `None` means the outcome is not known, which is not the same
+as "did not converge". Read it with `getattr(model, 'converged_', None)` if the
+model might come from a learner saved before this was recorded.
+
+`hr_suppressed_reason_` explains why the hazard-ratio table and forest plot
+were withheld, by either route: a penalty you passed, or one the fallback
+escalated to *past the first rung*. An escalation to the first rung (0.01)
+leaves the table in place, so the reason stays `None` there. The report prints
+whatever it returns, so you do not have to keep the fit-time warning to know
+why the section is missing.
 
 `ExportSplitWarning` is a `SuggestionWarning` that fires on every export whose
 output is not all where you asked for it — result tables too large for a

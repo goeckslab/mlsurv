@@ -108,6 +108,28 @@ class CoxPHModel(BaseSurvivalModel):
     overflow_detected_ : bool
         True if numerical instability was detected during fitting
         (overflow warnings or optimizer ValueError).
+    unstable_fit_kept_ : bool
+        True when the model that was kept still shows numerical instability:
+        ``force=True``, an ``alpha`` with no rung above it, or a winning
+        fallback rung that warned at the very penalty meant to fix it. Unlike
+        ``overflow_detected_``, which only says instability was seen, this
+        says whether anything resolved it, so it is what decides whether the
+        survival probabilities can be called usable.
+    converged_ : bool or None
+        Whether the fit that was kept converged within sksurv's default
+        ``n_iter``. When the fallback ladder engaged this describes the
+        winning rung, not the ``alpha`` you passed. Tracked separately from
+        ``overflow_detected_``: a fit can converge and still need a penalty,
+        or hit the iteration limit without any overflow. ``None`` means the
+        outcome is not known (before a fit, after one that raised, or on a
+        model saved before this was recorded), which is not the same as "did
+        not converge".
+    hr_suppressed_reason_ : str or None
+        Why ``exp(coef)`` is not reported as a multivariable hazard ratio, or
+        ``None`` when it is. Computed on read from ``(alpha, alpha_)``, so it
+        always agrees with ``hazard_ratio_valid``. The fit-time warning that
+        says the same thing never reaches someone reading the report later,
+        which is why the report renders this instead.
     feature_names_in_ : array-like
         Feature names from training data.
     n_features_in_ : int
@@ -156,10 +178,76 @@ class CoxPHModel(BaseSurvivalModel):
         """
         return self.alpha == 0 and getattr(self, "alpha_", 0) <= _FALLBACK_ALPHAS[0]
 
+    @property
+    def hr_suppressed_reason_(self):
+        """Why ``exp(coef)`` is not a multivariable hazard ratio, or None.
+
+        A property rather than something ``fit()`` stores, for two reasons. It
+        stays in step with ``hazard_ratio_valid``, which is computed from the
+        same ``(alpha, alpha_)``, so the two can never disagree. And it works
+        on a model unpickled from a learner saved before this existed, where a
+        stored attribute would be absent and the report would go back to
+        showing an unexplained gap. Such a model has no ``unstable_fit_kept_``
+        either, so the closing caveat falls back to the quieter wording.
+
+        Covers both routes to ``hazard_ratio_valid=False``: a ridge penalty
+        the user passed, and an automatic escalation past the first fallback
+        rung. Both branches assume the penalty is the cause, so a future third
+        route needs its own branch here rather than inheriting either text.
+        """
+        if self.hazard_ratio_valid:
+            return None
+
+        # alpha_ is absent before a fit; the constructor alpha is the honest
+        # stand-in, and it is what hazard_ratio_valid falls back to as well.
+        alpha_ = getattr(self, "alpha_", self.alpha)
+
+        # Instability a stronger penalty resolved leaves the survival
+        # probabilities fine, which is the whole point of escalating, so this
+        # reads what fit() recorded rather than inferring from
+        # overflow_detected_ (which only says instability was seen). False on
+        # a model saved before this was recorded: the quieter answer, matching
+        # what such a model's report used to say.
+        stability = (
+            " The C-index is unaffected, but this fit kept an unstable "
+            "solution, so survival probabilities may be unreliable."
+            if getattr(self, "unstable_fit_kept_", False) else
+            " The C-index and survival probabilities are unaffected."
+        )
+
+        # `alpha > 0`, never `if alpha`: 0 and 0.0 are the documented
+        # unregularized default, not "unset", and both are falsy.
+        if self.alpha > 0:
+            escalated = (
+                f" The fit then escalated to alpha={alpha_:g} for numerical "
+                f"stability, shrinking them further."
+                if alpha_ > self.alpha else ""
+            )
+            return (
+                f"Suppressed. You passed alpha={self.alpha:g}, an L2 ridge "
+                f"penalty, so the coefficients are biased toward zero and the "
+                f"hazard ratios, confidence intervals, and p-values would be "
+                f"conditional on the penalty rather than unbiased "
+                f"multivariable estimates.{escalated}{stability} For a "
+                f"regularized Cox model with proper inference, consider CoxNet."
+            )
+
+        return (
+            f"Suppressed. The fit needed alpha={alpha_:g} to stay stable, "
+            f"and at that penalty the coefficients are shrunk enough that "
+            f"hazard ratios, confidence intervals, and p-values would be "
+            f"conditional on the penalty rather than unbiased "
+            f"multivariable estimates.{stability}"
+        )
+
     def __init__(self, alpha=0, force=False):
         self.alpha = alpha
         self.force = force
         self.model_ = None
+        # None means "no fit has recorded an outcome yet", which the report
+        # renders as unknown rather than as a failure. Matches the same
+        # attribute on the fssvm, deepsurv, and deephit wrappers.
+        self.converged_ = None
 
     def fit(self, X, y: SurvivalArray):
         """
@@ -172,6 +260,11 @@ class CoxPHModel(BaseSurvivalModel):
         user's ``alpha``, so a supplied penalty is never weakened.  When the
         optimizer raises a ``ValueError`` (fit failed entirely), fallback
         always applies regardless of ``force`` (there is no model to keep).
+
+        A fit that merely runs out of iterations is kept and warned about
+        rather than escalated: the remedy is more iterations, not a penalty
+        that silently shrinks coefficients. The outcome is recorded in
+        ``converged_`` so the report can say which happened.
 
         Parameters
         ----------
@@ -200,9 +293,11 @@ class CoxPHModel(BaseSurvivalModel):
         self.model_ = CoxPHSurvivalAnalysis(alpha=self.alpha)
         self.overflow_detected_ = False
         self._last_solver_error_ = None
-        # Set only when the fallback escalates far enough to invalidate
-        # hazard-ratio inference; read by the report's model-details section.
-        self.hr_suppressed_reason_ = None
+        # Cleared so a re-fit that raises after this point does not leave the
+        # previous fit's outcome behind. _finalize_fit sets both on whichever
+        # path succeeds.
+        self.converged_ = None
+        self.unstable_fit_kept_ = False
 
         if self.alpha > 0:
             # A user-specified ridge penalty (e.g. from tuning an explicit
@@ -236,9 +331,10 @@ class CoxPHModel(BaseSurvivalModel):
                     FitFailureWarning,
                     stacklevel=2,
                 )
-            self.is_fitted_ = True
-            self._attach_covariance(X, y)
-            return self
+            # Reached only when the fit raised no instability at all.
+            return self._finalize_fit(
+                X, y, converged=not convergence_failed, unstable_kept=False
+            )
 
         # Numerical instability detected.
         self.overflow_detected_ = True
@@ -253,9 +349,11 @@ class CoxPHModel(BaseSurvivalModel):
                 FitFailureWarning,
                 stacklevel=2,
             )
-            self.is_fitted_ = True
-            self._attach_covariance(X, y)
-            return self
+            self._warn_if_not_converged(convergence_failed)
+            # force=True deliberately keeps the unstable fit.
+            return self._finalize_fit(
+                X, y, converged=not convergence_failed, unstable_kept=True
+            )
 
         # Fallback: re-fit with escalating regularization, taking the first
         # penalty that fits.
@@ -285,9 +383,11 @@ class CoxPHModel(BaseSurvivalModel):
                 FitFailureWarning,
                 stacklevel=2,
             )
-            self.is_fitted_ = True
-            self._attach_covariance(X, y)
-            return self
+            self._warn_if_not_converged(convergence_failed)
+            # No rung above the user's alpha, so the unstable fit is kept.
+            return self._finalize_fit(
+                X, y, converged=not convergence_failed, unstable_kept=True
+            )
         if not ladder:
             raise RuntimeError(
                 no_escalation + " The fit produced no model to keep."
@@ -373,16 +473,6 @@ class CoxPHModel(BaseSurvivalModel):
             # coefficients, so say what that costs. hazard_ratio_valid also
             # turns False here, which suppresses the hazard-ratio table and
             # forest plot; this warning explains why they went missing.
-            # The reason is also stored on the model, because a warning at fit
-            # time does not reach someone reading the report later.
-            self.hr_suppressed_reason_ = (
-                f"Suppressed. The fit needed alpha={winner:g} to stay stable, "
-                f"and at that penalty the coefficients are shrunk enough that "
-                f"hazard ratios, confidence intervals, and p-values would be "
-                f"conditional on the penalty rather than unbiased "
-                f"multivariable estimates. The C-index and survival "
-                f"probabilities are unaffected."
-            )
             warnings.warn(
                 f"CoxPH escalated to alpha={winner:g} to obtain a stable fit. "
                 f"At this penalty the coefficients are meaningfully shrunk "
@@ -418,9 +508,62 @@ class CoxPHModel(BaseSurvivalModel):
                 stacklevel=2,
             )
 
+        # winner_warned: the penalty that was meant to fix the instability
+        # still warned about it, so the escalation did not actually resolve it.
+        return self._finalize_fit(
+            X, y, converged=not winner_convergence, unstable_kept=winner_warned
+        )
+
+    def _finalize_fit(self, X, y, converged, unstable_kept):
+        """Record the fit outcome, mark fitted, attach covariance.
+
+        Every success path in ``fit()`` routes through here, so a path added
+        later records the outcome by construction instead of having to
+        remember to (guarded by
+        ``test_converged_is_recorded_on_every_success_path``).
+
+        Parameters
+        ----------
+        converged : bool
+            True when the fit that was kept converged. Callers invert
+            ``_fit_and_check``'s ``convergence_failed``, whose sense is the
+            opposite of this one.
+        unstable_kept : bool
+            True when the model being kept still shows numerical instability.
+            Each caller knows this and nothing downstream can re-derive it:
+            ``overflow_detected_`` says instability was *seen*, not whether a
+            penalty went on to resolve it, and a winning ladder rung can warn
+            about instability at the very penalty that was supposed to fix it.
+        """
+        self.converged_ = converged
+        self.unstable_fit_kept_ = unstable_kept
         self.is_fitted_ = True
         self._attach_covariance(X, y)
         return self
+
+    def _warn_if_not_converged(self, convergence_failed):
+        """Warn about a kept fit that hit the iteration limit.
+
+        The instability paths (``force=True``, and an alpha with no rung above
+        it) keep a fit without running the ladder, so without this they would
+        record ``converged_ = False`` for the report while the console said
+        nothing about convergence at all. Same condition, same remediation as
+        the plain and ladder paths warn about.
+        """
+        if not convergence_failed:
+            return
+        warnings.warn(
+            f"CoxPH(alpha={self.alpha}) optimizer did not converge within "
+            f"sksurv's default n_iter. Coefficients may be unreliable. "
+            f"Consider increasing n_iter (via sksurv's "
+            f"CoxPHSurvivalAnalysis) or passing a larger alpha.",
+            FitFailureWarning,
+            # 3, not the 2 its inline siblings use: one extra frame to skip,
+            # so the warning lands on the caller of fit() rather than on
+            # fit() itself. Otherwise this message and the identical inline
+            # one get different source attributions and dedupe separately.
+            stacklevel=3,
+        )
 
     def _fit_and_check(self, X, y):
         """Fit model and check for numerical instability.

@@ -12,6 +12,7 @@ Two behaviors are covered:
    alpha so a supplied penalty is never weakened.
 """
 
+import pickle
 import warnings
 from unittest.mock import patch
 
@@ -385,6 +386,242 @@ def test_hazard_ratio_valid_before_fit_is_unchanged():
     """The property is read before fit() in some code paths."""
     assert CoxPHModel(alpha=0).hazard_ratio_valid is True
     assert CoxPHModel(alpha=0.5).hazard_ratio_valid is False
+
+
+def test_user_alpha_records_a_reason_naming_that_alpha(train_test_data):
+    """The other route to suppression, which used to explain nothing.
+
+    A user-supplied alpha turns hazard_ratio_valid False just as an escalation
+    does, so the report needs the same explanation instead of an unexplained
+    gap where the table and forest plot were.
+    """
+    model, _, _ = _fit_with([CLEAN], train_test_data, alpha=0.1)
+
+    assert model.hazard_ratio_valid is False
+    assert "alpha=0.1" in model.hr_suppressed_reason_
+    assert "C-index and survival probabilities are unaffected" in \
+        model.hr_suppressed_reason_
+    # No ladder ran, so claiming an escalation would invent one.
+    assert "escalated" not in model.hr_suppressed_reason_
+
+
+def test_clean_unpenalized_fit_records_no_reason(train_test_data):
+    """The common case: nothing suppressed, so nothing to explain."""
+    model, _, _ = _fit_with([CLEAN], train_test_data)
+
+    assert model.hazard_ratio_valid is True
+    assert model.hr_suppressed_reason_ is None
+
+
+def test_user_alpha_reason_mentions_an_escalation_on_top_of_it(train_test_data):
+    """alpha=0.5 escalates to 1.0, so the reason must name both penalties.
+
+    Naming only the user's alpha would understate how much the coefficients
+    were shrunk; naming only the escalation would read as if the user had
+    asked for an unpenalized fit.
+    """
+    model, _, _ = _fit_with([FAILED, CLEAN], train_test_data, alpha=0.5)
+
+    assert model.alpha_ == 1.0
+    assert "alpha=0.5" in model.hr_suppressed_reason_
+    assert "escalated to alpha=1 for numerical stability" in \
+        model.hr_suppressed_reason_
+
+
+def test_reason_does_not_promise_usable_probabilities_after_instability(
+    train_test_data
+):
+    """"Unaffected" would contradict the warning the same fit emitted.
+
+    An alpha at the top of the ladder with instability keeps a fit whose
+    survival probabilities fit() called unreliable, so the suppression note
+    must not reassure the reader in the next paragraph.
+    """
+    model, _, _ = _fit_with([WARNED], train_test_data, alpha=2.0)
+
+    assert model.overflow_detected_ is True
+    assert "survival probabilities may be unreliable" in \
+        model.hr_suppressed_reason_
+    assert "survival probabilities are unaffected" not in \
+        model.hr_suppressed_reason_
+
+
+def test_resolved_instability_still_promises_usable_probabilities(
+    train_test_data
+):
+    """Escalating is supposed to fix it, so saying otherwise would mislead.
+
+    overflow_detected_ is True on every escalation, so keying the caveat off
+    that flag would put "may be unreliable" on the successful case the ladder
+    exists to produce.
+    """
+    model, _, _ = _fit_with(_side_effect_winning_at(1.0), train_test_data)
+
+    assert model.overflow_detected_ is True
+    assert model.unstable_fit_kept_ is False
+    assert "survival probabilities are unaffected" in \
+        model.hr_suppressed_reason_
+
+
+def test_escalation_that_did_not_resolve_instability_is_not_called_clean(
+    train_test_data
+):
+    """The winning rung warned at the very penalty meant to fix it.
+
+    (alpha, alpha_) alone cannot see this: it looks identical to a clean
+    escalation. fit() warns "may still be unreliable" here, so the recorded
+    flag has to carry that through to the report.
+    """
+    model, _, caught = _fit_with(
+        [FAILED, FAILED, WARNED], train_test_data
+    )
+
+    assert model.alpha_ == 0.1
+    assert model.unstable_fit_kept_ is True
+    assert any("may still be unreliable" in str(w.message)
+               for w in _fit_failures(caught))
+    assert "survival probabilities may be unreliable" in \
+        model.hr_suppressed_reason_
+
+
+def test_reason_survives_a_model_that_never_stored_it(train_test_data):
+    """A learner saved before this existed must still explain the gap.
+
+    hr_suppressed_reason_ is computed from (alpha, alpha_) rather than stored
+    at fit time, so an older pickle, which has no such attribute, still gets
+    an explanation instead of the unexplained gap this fix removes.
+    """
+    model, _, _ = _fit_with([CLEAN], train_test_data, alpha=0.1)
+    restored = pickle.loads(pickle.dumps(model))
+
+    assert "hr_suppressed_reason_" not in vars(restored)
+    assert "alpha=0.1" in restored.hr_suppressed_reason_
+
+
+# ---------------------------------------------------------------------------
+# 4b. convergence is recorded, not inferred from the absence of overflow
+# ---------------------------------------------------------------------------
+
+NOT_CONVERGED = (False, False, True)   # fit succeeded, hit the iteration limit
+UNSTABLE_NOT_CONVERGED = (False, True, True)   # ... and warned about overflow
+
+# (label, side_effect, alpha, force) for each of the four success returns in
+# fit(). Paired below so both convergence outcomes are covered on every path.
+SUCCESS_PATHS = [
+    ("plain", [CLEAN], [NOT_CONVERGED], 0, False),
+    ("force keeps unstable fit", [WARNED], [UNSTABLE_NOT_CONVERGED], 0, True),
+    ("no rung above alpha", [WARNED], [UNSTABLE_NOT_CONVERGED], 2.0, False),
+    ("ladder rung won", [FAILED, CLEAN], [FAILED, NOT_CONVERGED], 0, False),
+]
+
+
+@pytest.mark.parametrize(
+    "label, converged_effect, failed_effect, alpha, force", SUCCESS_PATHS
+)
+def test_converged_is_recorded_on_every_success_path(
+    label, converged_effect, failed_effect, alpha, force, train_test_data
+):
+    """Both outcomes, on all four paths that can return a fitted model.
+
+    A path that forgets leaves converged_ at None, which the report renders as
+    "not recorded". Covering the False case matters most on the two paths that
+    keep an unstable fit: the report line is the only place non-convergence
+    surfaces if the console warning is ever dropped.
+    """
+    def fit_and_record(side_effect):
+        model = CoxPHModel(alpha=alpha, force=force)
+        with patch.object(CoxPHModel, "_fit_and_check", side_effect=side_effect):
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                model.fit(X_train, y_train)
+        return model, caught
+
+    X_train, _, y_train, _ = train_test_data
+
+    model, _ = fit_and_record(converged_effect)
+    assert model.converged_ is True, label
+
+    model, caught = fit_and_record(failed_effect)
+    assert model.converged_ is False, label
+    # The report must never be the only place a non-converged fit is named.
+    assert any("did not converge" in str(w.message)
+               for w in _fit_failures(caught)), label
+
+
+def test_non_convergence_and_suppression_are_reported_together(train_test_data):
+    """The worst-case model: unreliable coefficients AND no hazard ratios.
+
+    Each caveat is covered alone elsewhere; this pins that neither masks the
+    other, since they are computed by different code and rendered as separate
+    lines.
+    """
+    model, _, _ = _fit_with([FAILED, FAILED, NOT_CONVERGED], train_test_data)
+
+    assert model.alpha_ == 0.1
+    assert model.converged_ is False
+    assert model.hazard_ratio_valid is False
+    assert "alpha=0.1" in model.hr_suppressed_reason_
+
+
+def test_converged_is_none_before_a_fit():
+    """None means "not known", which the report must not read as False."""
+    assert CoxPHModel().converged_ is None
+
+
+def test_a_failed_refit_does_not_keep_the_previous_outcome(train_test_data):
+    """Both flags describe one fit, so neither may outlive it.
+
+    Without the reset, hr_suppressed_reason_ would go on describing a fit
+    that no longer exists as having kept an unstable solution.
+    """
+    X_train, _, y_train, _ = train_test_data
+    model = CoxPHModel(alpha=2.0)
+
+    with patch.object(CoxPHModel, "_fit_and_check", side_effect=[WARNED]):
+        with warnings.catch_warnings(record=True):
+            warnings.simplefilter("always")
+            model.fit(X_train, y_train)
+    assert model.unstable_fit_kept_ is True
+
+    with patch.object(CoxPHModel, "_fit_and_check", side_effect=[FAILED]):
+        with pytest.raises(RuntimeError):
+            model.fit(X_train, y_train)
+
+    assert model.converged_ is None
+    assert model.unstable_fit_kept_ is False
+
+
+def test_sksurv_convergence_warning_is_classified(train_test_data):
+    """Guard the regex against an upstream reword.
+
+    converged_ is only as good as _CONVERGENCE_RE matching what sksurv
+    actually emits. If the wording drifts, convergence_failed silently goes
+    False and the report says "converged normally" for a fit that did not,
+    which is the bug this change removes arriving by another route. Build the
+    warning with sksurv's own class and message rather than a paraphrase.
+    """
+    # sksurv raises sklearn's ConvergenceWarning, not one of its own.
+    from sklearn.exceptions import ConvergenceWarning
+
+    X_train, _, y_train, _ = train_test_data
+    model = CoxPHModel(alpha=0)
+    model.model_ = _WarningModel(ConvergenceWarning(
+        "Optimization did not converge: Maximum number of iterations "
+        "has been exceeded."
+    ))
+
+    assert model._fit_and_check(X_train, y_train) == NOT_CONVERGED
+
+
+class _WarningModel:
+    """Stand-in for CoxPHSurvivalAnalysis whose fit() warns instead of raising."""
+
+    def __init__(self, warning):
+        self._warning = warning
+
+    def fit(self, X, y):
+        warnings.warn(self._warning)
+        return self
 
 
 # ---------------------------------------------------------------------------
