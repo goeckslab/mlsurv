@@ -106,6 +106,25 @@ from mlsurv.evaluation import compute_univariate_cox
 learner.univariate_cox = compute_univariate_cox(learner.X_train, learner.y_train)
 ```
 
+#### Unbounded hazard ratios
+
+A separated feature (every event on one side of it) or a badly scaled one
+pushes the coefficient far enough that `exp()` leaves the range of a float.
+Then `hr_upper_95` comes back as `inf`, `hr_lower_95` as `0.0`, and
+`hazard_ratio` itself can be either. The table keeps those values, because they
+are true: the interval really is unbounded.
+
+A log-scaled forest plot cannot place them, so it leaves them out of the axis
+range and draws nothing for them. An affected feature loses the whisker on the
+bad side, or its marker too when the point estimate is the bad value. It keeps
+its row either way, so you can still see which feature it is, and the hover
+text still shows the true bound. Each plot reports what it dropped through a
+`ClampWarning`, and the report's Hazard Ratios section repeats it in writing
+for whoever reads the report rather than runs it.
+
+If you see that warning, fix it on the data side: rescale or drop the feature,
+or recompute the table with a larger `penalizer`.
+
 ## SHAP Analysis
 
 SHAP (Shapley Additive Explanations)<sup>[4](#references)</sup> values decompose each prediction into per-feature contributions, providing both global importance rankings and individual patient-level explanations.

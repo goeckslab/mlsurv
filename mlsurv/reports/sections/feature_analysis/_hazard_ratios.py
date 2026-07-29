@@ -7,7 +7,9 @@ import pandas as pd
 from mlsurv.reports.sections.base import FigureInfo
 
 from ._coefficients import find_hr_valid_model
-from ._helpers import CHART_EXCEPTIONS, _missing_data_note
+from ._helpers import (
+    CHART_EXCEPTIONS, _missing_data_note, _unplottable_hr_note,
+)
 
 
 def generate_hazard_ratio_analysis(
@@ -84,6 +86,12 @@ def _render_univariate_hr(section, univar_cox, md_lines, figures, figure_info):
             "ranked by absolute deviation from HR = 1."
         )
         hr_desc += _missing_data_note(univar_cox)
+        # Describe the rows the figure draws, not the whole table behind it:
+        # plot_hazard_ratios(return_data=True) hands back the untruncated frame.
+        from mlsurv.viz.features import select_plotted_hr_features
+        hr_desc += _unplottable_hr_note(
+            select_plotted_hr_features(hr_data, section.n_features)
+        )
         md_lines.append(hr_desc)
         md_lines.append("")
 

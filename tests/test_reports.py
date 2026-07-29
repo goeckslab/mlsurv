@@ -4609,6 +4609,173 @@ class TestHazardRatiosForest:
         assert 'figures' in gen_result
 
 
+_UNPLOTTABLE_MSG = 'cannot be placed on a log axis'
+
+
+class TestHazardRatiosNonFinite:
+    """The section survives a feature whose univariate CI is unbounded.
+
+    A separated or badly scaled feature overflows lifelines'
+    exp(coef + 1.96*se) to +inf and underflows exp(coef - 1.96*se) to 0.0.
+    That infinity used to reach the log-decade tick computation and raise
+    OverflowError, which the report generator turned into
+    '*[Section unavailable: ...]*' for all of Feature Analysis.
+    """
+
+    @staticmethod
+    def _degenerate_data(n=80, seed=42):
+        import numpy as np
+        import pandas as pd
+
+        rng = np.random.default_rng(seed)
+        half = n // 2
+        # Complete separation: every event sits in the sep == 1 group. That is
+        # the likeliest source of the infinity; `tiny` is scaled small enough
+        # that its coefficient can overflow exp() too. Neither is guaranteed by
+        # construction, which is why the tests assert non-finiteness directly.
+        sep = np.concatenate([np.ones(half), np.zeros(n - half)])
+        event = sep.astype(bool)
+        time = np.where(event, rng.uniform(1, 20, n), rng.uniform(60, 100, n))
+        X = pd.DataFrame({
+            'age': rng.uniform(30, 80, n),
+            'biomarker': rng.normal(0, 1, n),
+            'sep': sep,
+            'tiny': rng.normal(0, 1, n) * 1e-8,
+        })
+        y = np.array(list(zip(event, time)),
+                     dtype=[('event', bool), ('time', float)])
+        return X, y
+
+    @classmethod
+    def _degenerate_learner(cls):
+        from mlsurv import SurvivalLearner
+
+        X, y = cls._degenerate_data()
+        learner = SurvivalLearner(X, y)
+        learner.setup(feature_selector=None, random_state=42, cv_folds=3,
+                      n_jobs=1)
+        return learner
+
+    @staticmethod
+    def _assert_really_degenerate(learner):
+        """Guard against the fixture quietly going benign on an upgrade."""
+        import numpy as np
+
+        cols = ['hazard_ratio', 'hr_lower_95', 'hr_upper_95']
+        vals = learner.univariate_cox[cols].to_numpy(dtype=float)
+        assert not (np.isfinite(vals) & (vals > 0)).all()
+
+    @pytest.mark.integration
+    def test_section_generates_with_infinite_hazard_ratio(self):
+        from mlsurv.reports.sections.feature_analysis import FeatureAnalysisSection
+
+        learner = self._degenerate_learner()
+        # The test is only meaningful if the design really produced an
+        # unplottable hazard ratio; assert that before anything else.
+        self._assert_really_degenerate(learner)
+
+        result = learner.train('coxph')
+        eval_result = learner.evaluate(result, n_importance_repeats=0,
+                                       bootstrap=False)
+
+        section = FeatureAnalysisSection(learner, eval_result=eval_result)
+        gen_result = section.generate()
+
+        fig_names = [name for name, _ in gen_result['figures']]
+        assert 'univariate_hazard_ratios.png' in fig_names
+        assert 'Section unavailable' not in gen_result['markdown']
+        assert 'OverflowError' not in gen_result['markdown']
+
+    def test_plot_warns_once_about_the_unbounded_interval(self):
+        """One warning per figure, carrying the total — not one per value."""
+        import warnings
+
+        from mlsurv._warnings import ClampWarning
+
+        learner = self._degenerate_learner()
+        self._assert_really_degenerate(learner)
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            learner.plot_hazard_ratios(kind='univariate')
+
+        # A list, not a set: a set would collapse duplicates and pass however
+        # many times the warning actually fired. Filtered by message because
+        # _safe_exp raises a different ClampWarning from the same module.
+        msgs = [str(w.message) for w in caught
+                if issubclass(w.category, ClampWarning)
+                and _UNPLOTTABLE_MSG in str(w.message)]
+        assert len(msgs) == 1
+
+    def test_forest_plot_hands_plotly_no_infinities(self):
+        """Plotly serializes a numpy array through a binary channel that
+        carries inf straight to the browser, so the figure itself must be
+        clean -- not merely free of exceptions."""
+        import numpy as np
+
+        learner = self._degenerate_learner()
+        self._assert_really_degenerate(learner)
+
+        fig = learner.plot_hazard_ratios(kind='univariate')
+        for trace in fig.data:
+            for values in (getattr(trace, 'x', None),
+                           getattr(getattr(trace, 'error_x', None), 'array', None),
+                           getattr(getattr(trace, 'error_x', None), 'arrayminus', None)):
+                if values is None:
+                    continue
+                arr = np.asarray(values, dtype=float)
+                assert not np.isinf(arr).any()
+
+    def test_hover_still_reports_the_true_bound(self):
+        """customdata is deliberately NOT sanitized.
+
+        The plot cannot draw an unbounded interval, but the hover is where the
+        reader learns the real number. Stripping it would remove the last
+        honest signal.
+        """
+        import numpy as np
+
+        learner = self._degenerate_learner()
+        self._assert_really_degenerate(learner)
+
+        fig = learner.plot_hazard_ratios(kind='univariate')
+        customdata = [t.customdata for t in fig.data
+                      if getattr(t, 'customdata', None) is not None]
+        assert customdata, 'expected CI bounds in customdata'
+        assert any(np.isinf(np.asarray(cd, dtype=float)).any()
+                   for cd in customdata)
+
+    def test_report_text_explains_the_missing_marker(self):
+        """The ClampWarning reaches the caller; the report reaches the reader."""
+        from mlsurv.reports.sections.feature_analysis import FeatureAnalysisSection
+
+        learner = self._degenerate_learner()
+        self._assert_really_degenerate(learner)
+        result = learner.train('coxph')
+        eval_result = learner.evaluate(result, n_importance_repeats=0,
+                                       bootstrap=False)
+
+        section = FeatureAnalysisSection(learner, eval_result=eval_result)
+        markdown = section.generate()['markdown']
+        assert 'could not be drawn in full' in markdown
+
+    def test_comparison_plot_survives_and_draws_no_infinite_whisker(self):
+        import numpy as np
+
+        learner = self._degenerate_learner()
+        self._assert_really_degenerate(learner)
+        learner.train('coxph')
+
+        fig = learner.plot_hazard_ratios_comparison()
+        for trace in fig.data:
+            err = getattr(trace, 'error_x', None)
+            for values in (getattr(err, 'array', None),
+                           getattr(err, 'arrayminus', None)):
+                if values is None:
+                    continue
+                assert not np.isinf(np.asarray(values, dtype=float)).any()
+
+
 class TestFeatureAnalysisEdgeCases:
     """Tests for feature analysis edge cases."""
 
@@ -4637,6 +4804,131 @@ class TestFeatureAnalysisEdgeCases:
         )
         assert r'gene\_1' in result
         assert r'x\*y' in result
+
+    @pytest.mark.parametrize("n_missing, expect_lead, expect_extent", [
+        # Both format strings, each with a finite and an infinite maximum.
+        ([0, 3, 12], 'in 2 of 3 features', 'up to 12 observations'),
+        ([4, 3, 12], 'in all 3 features', 'up to 12 observations'),
+        ([0, 3, float('inf')], 'in 2 of 3 features', None),
+        ([4, 3, float('inf')], 'in all 3 features', None),
+    ])
+    def test_missing_data_note(self, n_missing, expect_lead, expect_extent):
+        """The count is dropped when it is not finite: int(inf) raises."""
+        import pandas as pd
+
+        from mlsurv.reports.sections.feature_analysis._helpers import (
+            _missing_data_note,
+        )
+
+        univar = pd.DataFrame({
+            'feature': ['a', 'b', 'c'],
+            'n_missing': n_missing,
+        })
+        note = _missing_data_note(univar)
+        assert expect_lead in note
+        if expect_extent is None:
+            assert 'up to' not in note
+        else:
+            assert expect_extent in note
+        assert note.rstrip().endswith('*')
+
+    def test_missing_data_note_warns_on_a_corrupt_count(self):
+        """A missing count is a non-negative integer; inf means bad input."""
+        import warnings
+
+        import pandas as pd
+
+        from mlsurv._warnings import InternalWarning
+        from mlsurv.reports.sections.feature_analysis._helpers import (
+            _missing_data_note,
+        )
+
+        univar = pd.DataFrame({
+            'feature': ['a', 'b'],
+            'n_missing': [float('inf'), 3],
+        })
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            _missing_data_note(univar)
+        assert any(issubclass(w.category, InternalWarning) for w in caught)
+
+    def test_unplottable_hr_note_names_the_feature(self):
+        import numpy as np
+        import pandas as pd
+
+        from mlsurv.reports.sections.feature_analysis._helpers import (
+            _unplottable_hr_note,
+        )
+
+        hr_data = pd.DataFrame({
+            'feature': ['good', 'overflowed', 'underflowed'],
+            'hr': [1.5, np.inf, 2.0],
+            'ci_lower': [1.2, 1.0, 0.0],
+            'ci_upper': [1.8, np.inf, 3.0],
+        })
+        note = _unplottable_hr_note(hr_data)
+        assert 'overflowed' in note and 'underflowed' in note
+        assert 'good' not in note
+
+    def test_unplottable_hr_note_matches_what_the_plot_draws(self):
+        """The note must describe the drawn rows, not the whole table.
+
+        plot_hazard_ratios(return_data=True) hands back the untruncated frame,
+        so scanning it directly would name a feature the reader cannot see.
+        """
+        import numpy as np
+        import pandas as pd
+
+        from mlsurv.reports.sections.feature_analysis._helpers import (
+            _unplottable_hr_note,
+        )
+        from mlsurv.viz._features_hazard_ratios import (
+            select_plotted_hr_features,
+        )
+
+        # 'weak' has an unplottable bound but sits closest to HR = 1, so it
+        # ranks last and falls outside the top 3 the figure draws.
+        hr_data = pd.DataFrame({
+            'feature': ['big', 'mid', 'small', 'tiny', 'weak'],
+            'hr': [8.0, 4.0, 0.25, 0.125, 1.01],
+            'ci_lower': [7.0, 3.0, 0.2, 0.1, 0.99],
+            'ci_upper': [9.0, 5.0, 0.3, 0.15, np.inf],
+        })
+        drawn = select_plotted_hr_features(hr_data, 3)
+        assert 'weak' not in drawn['feature'].tolist()
+        assert _unplottable_hr_note(drawn) == ""
+        # Scanning the full table would have named it.
+        assert 'weak' in _unplottable_hr_note(hr_data)
+
+    def test_unplottable_hr_note_silent_on_clean_data(self):
+        import pandas as pd
+
+        from mlsurv.reports.sections.feature_analysis._helpers import (
+            _unplottable_hr_note,
+        )
+
+        hr_data = pd.DataFrame({
+            'feature': ['a', 'b'],
+            'hr': [1.5, 2.0],
+            'ci_lower': [1.2, 1.6], 'ci_upper': [1.8, 2.4],
+        })
+        assert _unplottable_hr_note(hr_data) == ""
+
+    def test_unplottable_hr_note_ignores_plain_missing_data(self):
+        """An all-NaN row is ordinary missing data, not an overflow."""
+        import numpy as np
+        import pandas as pd
+
+        from mlsurv.reports.sections.feature_analysis._helpers import (
+            _unplottable_hr_note,
+        )
+
+        hr_data = pd.DataFrame({
+            'feature': ['a', 'b'],
+            'hr': [np.nan, 2.0],
+            'ci_lower': [np.nan, 1.6], 'ci_upper': [np.nan, 2.4],
+        })
+        assert _unplottable_hr_note(hr_data) == ""
 
 
 class TestFeatureAnalysisNoImportance:

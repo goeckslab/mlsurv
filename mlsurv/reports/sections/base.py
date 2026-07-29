@@ -21,7 +21,10 @@ if TYPE_CHECKING:
 
 # Shared exception tuples for report section error handling
 DATA_EXCEPTIONS = (AttributeError, KeyError, NameError, TypeError, ValueError)
-RUNTIME_EXCEPTIONS = (RuntimeError, ZeroDivisionError)
+# ZeroDivisionError and OverflowError are both arithmetic failures a figure
+# built from degenerate data can hit: int() or math.ceil() on an infinite
+# value raises OverflowError.
+RUNTIME_EXCEPTIONS = (RuntimeError, ZeroDivisionError, OverflowError)
 ALL_EXCEPTIONS = DATA_EXCEPTIONS + RUNTIME_EXCEPTIONS
 # Extended tuples for sections that interact with the OS or optional imports.
 PLATFORM_EXCEPTIONS = ALL_EXCEPTIONS + (OSError,)

@@ -74,7 +74,13 @@ class IterativeWarning(UserWarning):
 
 
 class ClampWarning(MethodologicalWarning, IterativeWarning):
-    """Linear predictors clamped to prevent overflow.
+    """A value was clamped or dropped so a float overflow could not corrupt it.
+
+    Raised when linear predictors or risk scores are clipped before ``exp()``,
+    when a plotted coefficient is capped, and when a hazard ratio that already
+    overflowed to infinity or underflowed to zero is left out of a plot's axis
+    range. In every case the number you see is not the number the model
+    produced.
 
     Custom category so users can filter with
     ``warnings.filterwarnings("once", category=ClampWarning)``.

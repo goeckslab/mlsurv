@@ -102,6 +102,7 @@ from mlsurv.viz._features_hazard_ratios import (  # noqa: F401
     compute_hazard_ratios,
     plot_hazard_ratios,
     plot_hazard_ratios_comparison,
+    select_plotted_hr_features,
 )
 
 # ── Re-exports: correlation ───────────────────────────────────────────────

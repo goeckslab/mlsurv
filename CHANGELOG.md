@@ -9,6 +9,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **An unbounded hazard ratio no longer costs you the whole Feature Analysis
+  report section.** A separated or badly scaled feature makes the univariate
+  Cox `exp(coef + 1.96 * se)` overflow to infinity. That infinity reached the
+  hazard-ratio plot's log-scale tick computation, where `math.ceil` raised
+  `OverflowError`, and the report replaced the entire section — correlations,
+  importance, coefficients and all — with a placeholder. Hazard ratios and
+  bounds that a log axis cannot place (infinity from an overflow, zero from an
+  underflow) are now left out of the axis range and reported through a
+  `ClampWarning`. The affected feature loses the whisker on the bad side, or
+  its marker too when the point estimate is the bad value; every other feature
+  draws normally. Stray numpy divide and overflow warnings from the same values
+  are gone too.
+- **The report now says why a hazard ratio is missing from a forest plot.**
+  The warning above reaches whoever ran the code; the report is read by
+  someone else, who saw only a labelled row with no marker. The Hazard Ratios
+  section now names the affected features and explains the omission.
+- **A confidence bound on the wrong side of its hazard ratio no longer draws a
+  mirrored whisker.** A swapped `ci_lower_col` / `ci_upper_col` produced a
+  whisker to a value that appeared nowhere in the data. No whisker is drawn
+  now, and one `InternalWarning` per figure points at the likely swap.
+- **A hazard ratio too large for a log axis to label no longer breaks the
+  plot.** Past about `1e307` the tick computation built a power of ten too big
+  for a float, raising `OverflowError` for a bound that was large but perfectly
+  finite. Tick decades are now capped at what a float can hold, and a range
+  spanning hundreds of decades is labelled sparsely instead of at every one.
+- **A failed figure no longer takes its whole report section with it.**
+  `OverflowError` was missing from the shared report-section exception tuples,
+  so an arithmetic failure in one chart escaped the per-figure guard. It now
+  degrades to `*[Figure unavailable: ...]*` like every other recoverable chart
+  error.
+
 - **CoxPH is no longer dropped from cross-validation and tuning on
   near-singular designs.** When the Cox optimizer's solver failed, only some of
   the possible error messages routed into the automatic regularization
