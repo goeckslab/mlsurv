@@ -7,11 +7,13 @@ import warnings
 import numpy as np
 import pandas as pd
 from sklearn.base import clone
+from sklearn.exceptions import NotFittedError
 from sklearn.inspection import permutation_importance
 from joblib import Parallel, delayed
 
 from .._warnings import (
     InternalWarning,
+    MethodologicalWarning,
     MetricFailureWarning,
     SuggestionWarning,
 )
@@ -409,25 +411,91 @@ def _build_iterations_dataframe(result, features, n_repeats):
     return pd.DataFrame(iterations_data)
 
 
+def _selected_from_step(step):
+    """Return a selector step's ``selected_features_``, or None.
+
+    A ``feature_selector=[...]`` list is wrapped into a nested Pipeline
+    (see ``preprocessing/pipelines.py``), which carries no
+    ``selected_features_`` of its own even though its inner steps do. For
+    such a chain the *last* inner step that exposes the attribute wins: it
+    ran last, so its output is closest to what the model saw. Callers should
+    ask the wrapper Pipeline for ``get_feature_names_out()`` first, which
+    accounts for every step; this is the fallback for when that fails.
+    """
+    selected = getattr(step, 'selected_features_', None)
+    if selected is not None:
+        return selected
+    result = None
+    for _, inner in getattr(step, 'steps', []):
+        inner_selected = getattr(inner, 'selected_features_', None)
+        if inner_selected is not None:
+            result = inner_selected
+    return result
+
+
+def _names_out(step):
+    """Return a step's post-transform feature names, or None.
+
+    This is the authoritative answer for a chained ``feature_selector=[...]``
+    wrapper Pipeline, whose own names-out accounts for every step. It also
+    covers third-party selectors (``SelectKBest``, ``VarianceThreshold``,
+    ``RFE``), which have no ``selected_features_`` at all.
+    """
+    getter = getattr(step, 'get_feature_names_out', None)
+    if getter is None:
+        return None
+    try:
+        return list(getter())
+    except (AttributeError, ValueError, TypeError, KeyError, NotFittedError) as e:
+        logger.debug(
+            "get_feature_names_out() on %s raised %s: %s",
+            type(step).__name__, type(e).__name__, e,
+        )
+        return None
+
+
 def _get_selected_features(model, all_features):
     """Return selected feature names from a pipeline's selector step, or None.
 
-    When the selector received integer column indices (e.g. after a scaler
-    that strips names), the indices are mapped back to *all_features*.
+    Three rungs, in order: a chained selector's own ``get_feature_names_out()``
+    (it accounts for every step), then ``selected_features_``, then a plain
+    step's names-out. When the selector received integer column indices (e.g.
+    after a scaler that strips names), the indices are mapped back to
+    *all_features*.
+
+    ``None`` means the selection is unknown, which covers both "no selector in
+    the pipeline" and "a selector that reports nothing usable". Callers that
+    branch on it should treat those the same way.
     """
     if not (hasattr(model, 'named_steps') and 'selector' in model.named_steps):
         return None
     selector = model.named_steps['selector']
-    selected = getattr(selector, 'selected_features_', None)
+    # For a chain of selectors, the wrapper Pipeline's own get_feature_names_out()
+    # is authoritative: it reflects every step, including a final third-party
+    # one that narrows further without exposing `selected_features_`. Asking
+    # the inner steps first would stop at a stale, too-long list.
+    selected = _names_out(selector) if hasattr(selector, 'steps') else None
+    if selected is None:
+        selected = _selected_from_step(selector)
+    if selected is None:
+        # Non-Pipeline selectors only: a Pipeline already tried this above.
+        selected = _names_out(selector)
     if selected is None:
         logger.debug(
-            "Pipeline has 'selector' step (%s) but no selected_features_ attribute.",
+            "Pipeline 'selector' step (%s) reports neither selected_features_ "
+            "nor usable get_feature_names_out().",
             type(selector).__name__,
         )
         return None
     selected = list(selected)
     # If the selector saw integer column indices, map them to real names
     if selected and isinstance(selected[0], (int, np.integer)):
+        if any(not 0 <= i < len(all_features) for i in selected):
+            logger.debug(
+                "Selector indices out of range for %d features: %s",
+                len(all_features), selected,
+            )
+            return None
         return [all_features[i] for i in selected]
     return selected
 
@@ -435,64 +503,203 @@ def _get_selected_features(model, all_features):
 def _align_coefficients(coef_values, selected_features, all_features):
     """Align coefficients from selected features to the full feature list.
 
-    Uses NaN for features not in *selected_features* (no coefficient exists).
-    *selected_features* must already contain string names matching *all_features*.
+    *selected_features* holds the resolved labels that key *coef_values*, one
+    per value. Labels that are not in *all_features* (an intercept, a scale
+    term) drop out; features with no label get NaN.
+
+    Always returns exactly ``len(all_features)`` values. Raises ``ValueError``
+    on a length mismatch or a duplicated label, rather than padding or
+    truncating to fit.
     """
-    # Always build a fresh Series keyed by the resolved string names
     values = coef_values.values if isinstance(coef_values, pd.Series) else coef_values
-    coef_series = pd.Series(values, index=selected_features)
+    labels = list(selected_features)
+    if len(values) != len(labels):
+        raise ValueError(
+            f"Cannot align coefficients: {len(values)} values but "
+            f"{len(labels)} feature labels."
+        )
+    if len(set(labels)) != len(labels):
+        raise ValueError(
+            f"Cannot align coefficients: duplicate feature labels in {labels}."
+        )
+    coef_series = pd.Series(values, index=labels)
     return coef_series.reindex(all_features).values.tolist()
 
 
-def _get_coefficients(model, features):
-    """Extract model coefficients, aligned to feature order."""
-    actual_model = unwrap_pipeline(model)
-    selected_features = _get_selected_features(model, features)
+def _resolve_coef_labels(coef_series, selected_features, features):
+    """Return the labels that key *coef_series*, or None if unresolvable.
 
-    # Only propagate pipeline feature names when there is no selector.
-    # With a selector, the inner model already has the correct post-selection
-    # feature names; propagating the full set would cause a length mismatch
-    # inside get_coefficients().
-    if selected_features is None:
-        propagate_feature_names(actual_model, model)
+    Priority matters:
 
-    # get_coefficients() is the mlsurv standard (CoxPH, CoxNet, FSSVM)
+    1. The model's own coefficient index, when it carries string names and at
+       least one of them is a test feature. Some models return coefficients in
+       a different order than the selector emitted them (lifelines'
+       Weibull-AFT sorts its covariates), so keying by the selector's order
+       would silently attach each value to the wrong feature.
+    2. The selector's post-selection names, correct when the model has no
+       name index, because then no name-based reordering can have happened.
+    3. *features* itself, when the vector is already full length.
+    """
+    index = getattr(coef_series, 'index', None)
+    if index is not None and len(index) and all(isinstance(i, str) for i in index):
+        if set(index) & set(features):
+            # Keying by name is correct per label, so labels the test set does
+            # not have (an intercept, a scale term) simply drop out.
+            return list(index)
+        # Names that match nothing (a pipeline fit on unnamed arrays gets
+        # sklearn's x0, x1, ...). Those are positional by construction, so
+        # fall through to positional alignment.
+        logger.debug(
+            "Coefficient index %s matches no test feature; aligning by "
+            "position instead.", list(index),
+        )
+    if selected_features is not None:
+        return list(selected_features)
+    if len(coef_series) == len(features):
+        return list(features)
+    return None
+
+
+# Returned when a model legitimately has no coefficients (trees, deep
+# models). Distinct from None, which means extraction was attempted and
+# failed. That one has to reach the user; this one is the normal case.
+_NO_COEFFICIENTS = object()
+
+# Errors a model wrapper can raise while producing its coefficients. Anything
+# outside this set (a NameError in a wrapper, say) is a bug and should escape
+# rather than turn into a quiet NaN column.
+_COEF_EXTRACTION_ERRORS = (
+    ValueError, TypeError, AttributeError, KeyError, IndexError, NotFittedError,
+)
+
+
+def _warn_coefficients_unresolved(actual_model, reason, model_name=None):
+    """Report that the coefficient column had to fall back to NaN.
+
+    Permutation importance itself is unaffected, so say so: the user should
+    not read this as a lost importance result. Routed through
+    ``log_metric_failure`` so the logger summary drops to DEBUG whenever a
+    visible (non-``InternalWarning``) warning is emitted for the same failure,
+    which keeps it off stderr twice (see ``logging_utils``).
+    """
+    exc = reason if isinstance(reason, BaseException) else ValueError(str(reason))
+    # Name the model, not just its class: MetricFailureWarning is an
+    # IterativeWarning, deduped once per unique message, so a class-only
+    # message would silence every model after the first.
+    label = model_name or type(actual_model).__name__
+    log_metric_failure(
+        logger, "importance_coefficients", exc,
+        model_name=label, warn_user=True,
+        warn_category=MetricFailureWarning,
+        user_message=(
+            f"Could not resolve coefficients for {label} "
+            f"({type(actual_model).__name__}): {reason}. The coefficient "
+            f"column will be NaN; permutation importance is unaffected."
+        ),
+    )
+
+
+def _extract_raw_coefficients(actual_model, model_name=None):
+    """Return the model's raw coefficients, or a sentinel.
+
+    Tries mlsurv's ``get_coefficients()`` first, then a direct ``coef_`` for
+    plain sklearn estimators. Every mlsurv wrapper defines
+    ``get_coefficients()``; the ones without coefficients return ``None``.
+
+    Returns ``_NO_COEFFICIENTS`` when the model simply has none (the normal
+    case for trees and deep models), and ``None`` when extraction was
+    attempted and failed, which is reported to the user before returning.
+    """
     if hasattr(actual_model, 'get_coefficients'):
         try:
-            coef_series = actual_model.get_coefficients()
-        except Exception as e:
-            if isinstance(e, (MemoryError, RecursionError)):
-                raise
-            logger.warning(
-                "Failed to extract coefficients from %s: %s",
-                type(actual_model).__name__, e,
-            )
-            return [np.nan] * len(features)
-        if coef_series is None:
-            return [np.nan] * len(features)
-        if len(coef_series) != len(features) and selected_features is not None:
-            return _align_coefficients(coef_series, selected_features, features)
-        return coef_series.values.tolist()
+            coef = actual_model.get_coefficients()
+        except (MemoryError, RecursionError):
+            raise
+        except _COEF_EXTRACTION_ERRORS as e:
+            _warn_coefficients_unresolved(actual_model, e, model_name)
+            return None
+        return _NO_COEFFICIENTS if coef is None else coef
 
-    # Fallback: direct coef_ access (non-mlsurv sklearn estimators)
     if hasattr(actual_model, 'coef_'):
         try:
             coef = actual_model.coef_
             if coef.ndim == 2:  # CoxNet: (n_features, n_alphas)
                 coef = coef[:, 0]
-            if len(coef) != len(features) and selected_features is not None:
-                return _align_coefficients(coef, selected_features, features)
-            return coef.tolist()
-        except Exception as e:
-            if isinstance(e, (MemoryError, RecursionError)):
-                raise
-            logger.warning(
-                "Failed to extract coefficients from %s: %s",
-                type(actual_model).__name__, e,
-            )
-            return [np.nan] * len(features)
+            return coef
+        except (MemoryError, RecursionError):
+            raise
+        except _COEF_EXTRACTION_ERRORS as e:
+            _warn_coefficients_unresolved(actual_model, e, model_name)
+            return None
 
-    return [np.nan] * len(features)
+    return _NO_COEFFICIENTS
+
+
+def _get_coefficients(model, features, model_name=None):
+    """Extract model coefficients, aligned to feature order.
+
+    Always returns a list of exactly ``len(features)`` values; features with
+    no resolvable coefficient are NaN. Every coefficient problem it can
+    recognize degrades to that NaN column rather than raising, because a
+    coefficient problem must not discard a permutation-importance result that
+    was computed successfully. Only an unexpected exception type (a bug in a
+    wrapper) propagates. Models without coefficients (trees, deep models) get
+    all NaN, which is the normal case rather than a failure.
+    """
+    nan_result = [np.nan] * len(features)
+    actual_model = unwrap_pipeline(model)
+    selected_features = _get_selected_features(model, features)
+
+    # Propagate names only when the selector told us nothing, either because
+    # there is no selector or because it reports no usable selection. When we
+    # do know the selection, the inner model's own post-selection names are
+    # the ones that matter.
+    if selected_features is None:
+        propagate_feature_names(actual_model, model)
+
+    coef_series = _extract_raw_coefficients(actual_model, model_name)
+    if coef_series is _NO_COEFFICIENTS or coef_series is None:
+        # No coefficients to have (trees, deep models), or extraction failed
+        # and already reported. Either way the column is NaN.
+        return nan_result
+    if len(coef_series) == 0:
+        _warn_coefficients_unresolved(
+            actual_model, "the model returned 0 coefficients", model_name,
+        )
+        return nan_result
+
+    labels = _resolve_coef_labels(coef_series, selected_features, features)
+    if labels is None:
+        _warn_coefficients_unresolved(
+            actual_model,
+            f"{len(coef_series)} coefficients could not be matched to "
+            f"{len(features)} features",
+            model_name,
+        )
+        return nan_result
+
+    try:
+        aligned = _align_coefficients(coef_series, labels, features)
+        # Inside the try: a non-numeric coefficient makes this cast raise,
+        # and that is a recognizable coefficient problem, not a wrapper bug.
+        has_finite = bool(np.isfinite(np.asarray(aligned, dtype=float)).any())
+    except (ValueError, TypeError) as e:
+        _warn_coefficients_unresolved(actual_model, e, model_name)
+        return nan_result
+
+    # The model had coefficients but not one usable value reached a test
+    # feature, either because the labels describe a different feature space or
+    # because the fit produced NaNs. Same NaN column either way, but the user
+    # should hear about it rather than read it as "this model has no
+    # coefficients".
+    if not has_finite:
+        _warn_coefficients_unresolved(
+            actual_model,
+            f"no finite coefficient out of {len(coef_series)} landed on a "
+            f"test-set feature",
+            model_name,
+        )
+    return aligned
 
 
 def _empty_importance_results():
@@ -506,9 +713,70 @@ def _empty_importance_results():
     return summary_df, iterations_df
 
 
+def _subsample_for_importance(X_test, y_test: SurvivalArray, max_samples,
+                              random_state):
+    """Return *X_test*, *y_test* capped at *max_samples* rows.
+
+    Permutation importance costs ``n_features x n_repeats x (predict +
+    C-index over n_test rows)``, and the C-index term is superlinear in
+    ``n_test``, so on large cohorts importance can out-cost model fitting.
+    Capping the rows attacks that term directly.
+
+    With an int *random_state* the draw depends only on that seed, the cohort
+    size, and *max_samples*, so every model in an evaluate() call sees the
+    same rows and their importances stay comparable. A shared
+    ``RandomState`` instance advances between calls, so each model draws
+    different rows; that case is not warned about. With ``None`` the caller
+    is warned. ``max_samples`` of ``None``, or a value at or above the cohort
+    size, returns the inputs untouched.
+
+    Raises
+    ------
+    ValueError
+        If *max_samples* is not an int, or is below 2. This is the only
+        validation on the ``learner.importance()`` path, which does not build
+        an ``EvalConfig``.
+    """
+    if max_samples is None:
+        return X_test, y_test
+    if isinstance(max_samples, bool) or not isinstance(
+            max_samples, (int, np.integer)):
+        raise ValueError(
+            f"importance_max_samples must be an int or None, got "
+            f"{type(max_samples).__name__}."
+        )
+    # 2, not 1: the C-index needs a comparable pair, so a single row makes
+    # every permutation score undefined and costs the model its whole
+    # importance table. Mirrors interaction_max_samples.
+    if max_samples < 2:
+        raise ValueError(
+            f"importance_max_samples must be >= 2 or None, got {max_samples}."
+        )
+    if max_samples >= len(X_test):
+        return X_test, y_test
+    if random_state is None:
+        warnings.warn(
+            "importance_max_samples was set but random_state is None, so "
+            "each model draws a different subsample and importances are not "
+            "comparable across models. Pass setup(random_state=...) or "
+            "evaluate(random_state=...) to make the draw reproducible.",
+            MethodologicalWarning, stacklevel=2,
+        )
+    # A RandomState instance is a supported random_state throughout this
+    # module (see _grouped_permutation_importance); passing one to the
+    # RandomState constructor would raise. Note that a shared instance
+    # advances between models, so their subsamples differ.
+    rng = (random_state if isinstance(random_state, np.random.RandomState)
+           else np.random.RandomState(random_state))
+    idx = rng.choice(len(X_test), size=max_samples, replace=False)
+    idx.sort()  # keep cohort order, so the subsample reads like the cohort
+    return X_test.iloc[idx], y_test[idx]
+
+
 def _compute_permutation_importance(model, X_test, y_test: SurvivalArray, n_repeats, random_state,
                                     show_progress=True, model_name=None, n_jobs=1,
-                                    categorical_groups=None, replacing=False):
+                                    categorical_groups=None, replacing=False,
+                                    max_samples=None):
     """Compute feature importance with iteration-level detail.
 
     Parallelism is applied across features via sklearn's
@@ -517,6 +785,9 @@ def _compute_permutation_importance(model, X_test, y_test: SurvivalArray, n_repe
 
     When *replacing* is True, the progress line notes that previously computed
     importance results are being replaced.
+
+    *max_samples* caps the test rows used (see
+    :func:`_subsample_for_importance`); ``None`` uses all of them.
 
     Returns
     -------
@@ -529,6 +800,9 @@ def _compute_permutation_importance(model, X_test, y_test: SurvivalArray, n_repe
         Only populated when *categorical_groups* is used; ``None`` otherwise.
     """
     features = X_test.columns.tolist()
+    X_test, y_test = _subsample_for_importance(
+        X_test, y_test, max_samples, random_state,
+    )
 
     if show_progress:
         display_name = model_name if model_name else "model"
@@ -541,6 +815,9 @@ def _compute_permutation_importance(model, X_test, y_test: SurvivalArray, n_repe
 
     per_column_df = None
     t0 = time.perf_counter()
+
+    # Phase 1: the permutation itself. Only a failure here means there is no
+    # importance to report, so only this phase returns the empty sentinel.
     try:
         use_grouped = bool(categorical_groups)
         if use_grouped:
@@ -570,12 +847,6 @@ def _compute_permutation_importance(model, X_test, y_test: SurvivalArray, n_repe
                 scoring=scoring_fn,
             )
             result_features = result.feature_names
-
-            # Build per-column summary from the standard result
-            coefficients_std = _get_coefficients(model, features)
-            per_column_df = _build_importance_summary(
-                result_std, features, coefficients_std,
-            )
         else:
             result = result_std
             result_features = features
@@ -583,32 +854,72 @@ def _compute_permutation_importance(model, X_test, y_test: SurvivalArray, n_repe
         if show_progress:
             print(f" done ({_format_elapsed(time.perf_counter() - t0)}).")
 
-        if use_grouped:
-            # Grouped features get NaN coefficients (not aggregatable); reuse
-            # `coefficients_std` from the per-column summary above (same model,
-            # same features -> identical extraction).
-            coefficients = []
-            for fname in result_features:
-                if fname in valid_groups:
-                    coefficients.append(np.nan)
-                else:
-                    idx = features.index(fname)
-                    coefficients.append(coefficients_std[idx])
-        else:
-            coefficients = _get_coefficients(model, features)
-
-        summary_df = _build_importance_summary(result, result_features, coefficients)
-        iterations_df = _build_iterations_dataframe(result, result_features, n_repeats)
-
     except (MemoryError, RecursionError):
         raise
-    except (ValueError, TypeError, AttributeError, KeyError, RuntimeError) as e:
-        log_metric_failure(logger, "permutation_importance", e,
-                           model_name=model_name, warn_user=True)
+    except (ValueError, TypeError, AttributeError, KeyError, IndexError,
+            RuntimeError) as e:
+        log_metric_failure(
+            logger, "permutation_importance", e,
+            model_name=model_name, warn_user=True,
+            warn_category=MetricFailureWarning,
+            user_message=(
+                f"Permutation importance failed for "
+                f"{model_name or 'model'} ({type(e).__name__}: {e}). "
+                f"Importance is unavailable for this model."
+            ),
+        )
         if show_progress:
-            print(f" failed ({_format_elapsed(time.perf_counter() - t0)}).")
+            print(f" failed ({type(e).__name__}, "
+                  f"{_format_elapsed(time.perf_counter() - t0)}).")
         summary_df, iterations_df = _empty_importance_results()
+        return summary_df, iterations_df, None
+
+    # Phase 2: attach coefficients. A problem here degrades the coefficient
+    # column to NaN. It must never throw away the importance just computed.
+    try:
+        coefficients_std = _get_coefficients(model, features, model_name)
+        if use_grouped:
+            per_column_df = _build_importance_summary(
+                result_std, features, coefficients_std,
+            )
+            # Grouped features get NaN coefficients (not aggregatable). The
+            # rest are ungrouped column names, so each one indexes back into
+            # `features` to find its own coefficient.
+            coefficients = [
+                np.nan if fname in valid_groups
+                else coefficients_std[features.index(fname)]
+                for fname in result_features
+            ]
+        else:
+            coefficients = coefficients_std
+        # The summary builders below sit outside this guard, so check the
+        # length contract here: a violation becomes the handled NaN column
+        # rather than a pandas error that aborts the whole evaluate() run.
+        if len(coefficients) != len(result_features):
+            raise ValueError(
+                f"coefficient/feature length mismatch: {len(coefficients)} "
+                f"vs {len(result_features)}"
+            )
+    except (MemoryError, RecursionError):
+        raise
+    except (ValueError, TypeError, AttributeError, KeyError, IndexError,
+            RuntimeError) as e:
+        log_metric_failure(
+            logger, "importance_coefficients", e,
+            model_name=model_name, warn_user=True,
+            warn_category=MetricFailureWarning,
+            user_message=(
+                f"Could not attach coefficients for "
+                f"{model_name or 'model'} ({type(e).__name__}: {e}). "
+                f"The coefficient column will be NaN; permutation "
+                f"importance is unaffected."
+            ),
+        )
+        coefficients = [np.nan] * len(result_features)
         per_column_df = None
+
+    summary_df = _build_importance_summary(result, result_features, coefficients)
+    iterations_df = _build_iterations_dataframe(result, result_features, n_repeats)
 
     return summary_df, iterations_df, per_column_df
 

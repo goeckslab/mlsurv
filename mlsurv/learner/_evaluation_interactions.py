@@ -1353,6 +1353,7 @@ default="bonferroni"
         self: SurvivalLearner,
         model_result,
         n_importance_repeats: int = 10,
+        importance_max_samples: int | None = None,
         random_state=None,
         show_progress: bool = True,
         n_jobs=None,
@@ -1384,6 +1385,10 @@ default="bonferroni"
             :meth:`importance` boundary).
         n_importance_repeats : int, default=10
             Number of permutation repeats per feature.
+        importance_max_samples : int, optional
+            Cap on the test rows used. ``None`` (the default) uses every
+            row; a value at or above the cohort size is a no-op, and the
+            minimum is 2. Mirrors ``evaluate(importance_max_samples=...)``.
         random_state : int, optional
             Seed for reproducible permutations.  Falls back to the learner's
             ``random_state`` when ``None``.
@@ -1440,6 +1445,7 @@ default="bonferroni"
             show_progress=show_progress, model_name=mr.name,
             n_jobs=nj, categorical_groups=cat_groups,
             replacing=had_prior,
+            max_samples=importance_max_samples,
         )
 
         # On failure the helper returns an empty sentinel (and has already
@@ -1483,6 +1489,7 @@ default="bonferroni"
         method: str = "permutation",
         *,
         n_importance_repeats: int = 10,
+        importance_max_samples: int | None = None,
         max_explain: int = 50,
         max_background: int = 50,
         random_state=None,
@@ -1522,6 +1529,10 @@ default="bonferroni"
             Which importance to compute.
         n_importance_repeats : int, default=10
             Permutation repeats per feature.  Ignored when ``method='shap'``.
+        importance_max_samples : int, optional
+            Cap on the test rows used.  ``None`` (the default) uses every
+            row; the minimum is 2.  Ignored when ``method='shap'`` (use
+            ``max_explain``).
         max_explain : int, default=50
             Maximum samples to explain.  Used only when ``method='shap'``.
         max_background : int, default=50
@@ -1589,6 +1600,7 @@ default="bonferroni"
                 df = self._permutation_importance(
                     mr,
                     n_importance_repeats=n_importance_repeats,
+                    importance_max_samples=importance_max_samples,
                     random_state=random_state,
                     show_progress=show_progress,
                     n_jobs=n_jobs,

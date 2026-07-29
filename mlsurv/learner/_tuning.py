@@ -62,6 +62,7 @@ class TuneConfig:
     evaluate: bool = False
     eval_times: Optional[object] = None
     n_importance_repeats: Union[int, str] = "auto"
+    importance_max_samples: Optional[int] = None
     include_shap: bool = False
     shap_max_background: int = 50
     shap_max_explain: int = 50
@@ -281,6 +282,7 @@ class TuningMixin:
         evaluate=False,
         eval_times=None,
         n_importance_repeats="auto",
+        importance_max_samples=None,
         include_shap=False,
         shap_max_background=50,
         shap_max_explain=50,
@@ -382,6 +384,11 @@ class TuningMixin:
         n_importance_repeats : int or "auto", default="auto"
             Number of permutation importance repeats.  When ``"auto"``
             (the default), uses 10 repeats for all models.
+        importance_max_samples : int, optional
+            Cap on the test rows used for permutation importance in the
+            post-tune evaluation, so it applies only when ``evaluate=True``.
+            ``None`` (the default) uses every row; the minimum is 2. See
+            :meth:`evaluate`.
         include_shap : bool, default=False
             If True, compute SHAP values.
         shap_max_background : int, default=50
@@ -474,6 +481,7 @@ class TuningMixin:
             show_progress_bar=show_progress_bar,
             evaluate=evaluate, eval_times=eval_times,
             n_importance_repeats=n_importance_repeats,
+            importance_max_samples=importance_max_samples,
             include_shap=include_shap,
             shap_max_background=shap_max_background,
             shap_max_explain=shap_max_explain,
@@ -728,6 +736,7 @@ class TuningMixin:
         result.evaluation = self.evaluate(
             result, eval_times=config.eval_times,
             n_importance_repeats=config.n_importance_repeats,
+            importance_max_samples=config.importance_max_samples,
             include_shap=config.include_shap,
             shap_max_background=config.shap_max_background,
             shap_max_explain=config.shap_max_explain,

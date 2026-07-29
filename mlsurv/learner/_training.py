@@ -1232,6 +1232,7 @@ class TrainingMixin(CvTrainingMixin):
         evaluate: bool = True,
         eval_times: np.ndarray | list | None = None,
         n_importance_repeats: int | str | dict = "auto",
+        importance_max_samples: int | None = None,
         include_shap: bool = False,
         shap_max_background: int = 50,
         shap_max_explain: int = 50,
@@ -1308,6 +1309,10 @@ class TrainingMixin(CvTrainingMixin):
             (the default), uses 10 repeats for all models.
             Pass a dict of {model_name: int} for per-model repeat counts;
             models not in the dict fall back to ``"auto"``.
+        importance_max_samples : int, optional
+            Cap on the test rows used for permutation importance. ``None``
+            (the default) uses every row; the minimum is 2. See
+            :meth:`evaluate`.
         include_shap : bool, default=False
             If True, compute SHAP values.
         shap_max_background : int, default=50
@@ -1463,6 +1468,7 @@ class TrainingMixin(CvTrainingMixin):
                 interaction_top_k=interaction_top_k,
                 interaction_max_samples=interaction_max_samples,
                 interaction_method=interaction_method,
+                importance_max_samples=importance_max_samples,
             )
 
         # Return shallow copy so callers can't corrupt internal state.

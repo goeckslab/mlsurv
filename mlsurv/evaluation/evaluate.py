@@ -243,6 +243,7 @@ def evaluate(
     eval_times=None,
     extra_eval_times=None,
     n_importance_repeats: Union[int, str] = "auto",
+    importance_max_samples: Optional[int] = None,
     include_shap=False,
     shap_max_background=50,
     shap_max_explain=50,
@@ -318,6 +319,12 @@ def evaluate(
         ``"auto"`` (the default), uses 10 repeats for all models.
         Pass a dict of {model_name: int} for per-model repeat counts;
         models not in the dict fall back to ``"auto"``.
+    importance_max_samples : int, optional
+        Cap on the test rows used for permutation importance. ``None``
+        (default) uses every row. A value at or above the cohort size is a
+        no-op; the minimum is 2. The draw is seeded from *random_state*, so
+        with a seed set every model sees the same rows; without one, each
+        model draws its own subsample and mlsurv warns.
     include_shap : bool, default=False
         If True, compute SHAP values (requires shap package).
     shap_max_background : int, default=50
@@ -456,6 +463,7 @@ def evaluate(
             eval_times=eval_times,
             extra_eval_times=extra_eval_times,
             n_importance_repeats=resolved_repeats,
+            importance_max_samples=importance_max_samples,
             include_shap=include_shap,
             shap_max_background=shap_max_background,
             shap_max_explain=shap_max_explain,
@@ -514,6 +522,7 @@ def evaluate(
         eval_times=eval_times,
         extra_eval_times=extra_eval_times,
         n_importance_repeats=single_repeats,
+        importance_max_samples=importance_max_samples,
         include_shap=include_shap,
         shap_max_background=shap_max_background,
         shap_max_explain=shap_max_explain,
@@ -551,6 +560,7 @@ def _evaluate_single(
     eval_times=None,
     extra_eval_times=None,
     n_importance_repeats=DEFAULT_N_IMPORTANCE_REPEATS,
+    importance_max_samples=None,
     include_shap=False,
     shap_max_background=50,
     shap_max_explain=50,
@@ -662,6 +672,7 @@ def _evaluate_single(
     # Bundle eval config for helper calls
     config = EvalConfig(
         n_importance_repeats=n_importance_repeats,
+        importance_max_samples=importance_max_samples,
         eval_times=eval_times,
         random_state=random_state,
         include_shap=include_shap,
@@ -861,6 +872,7 @@ def _run_importance_phase(model, X_test, y_test, config, model_name,
             show_progress=config.show_progress, model_name=model_name,
             n_jobs=importance_n_jobs,
             categorical_groups=config.categorical_groups,
+            max_samples=config.importance_max_samples,
         )
     else:
         importance_df, iterations_df = _empty_importance_results()
@@ -1695,6 +1707,7 @@ def _evaluate_multiple(
     eval_times=None,
     extra_eval_times=None,
     n_importance_repeats=DEFAULT_N_IMPORTANCE_REPEATS,
+    importance_max_samples=None,
     include_shap=False,
     shap_max_background=50,
     shap_max_explain=50,
@@ -1821,6 +1834,7 @@ def _evaluate_multiple(
                 eval_times=eval_times,
                 extra_eval_times=extra_eval_times,
                 n_importance_repeats=model_repeats,
+                importance_max_samples=importance_max_samples,
                 include_shap=include_shap,
                 shap_max_background=shap_max_background,
                 shap_max_explain=shap_max_explain,

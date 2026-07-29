@@ -52,6 +52,8 @@ class EvalConfig:
     call layers unchanged.
     """
     n_importance_repeats: int = 10
+    # Cap on the test rows used for permutation importance. None = all rows.
+    importance_max_samples: Optional[int] = None
     eval_times: Optional[np.ndarray] = None
     random_state: Optional[int] = None
     include_shap: bool = False
@@ -81,6 +83,20 @@ class EvalConfig:
     gnd_n_bins: int = 10
 
     def __post_init__(self):
+        if self.importance_max_samples is not None:
+            if (isinstance(self.importance_max_samples, bool)
+                    or not isinstance(self.importance_max_samples,
+                                      (int, np.integer))):
+                raise ValueError(
+                    f"importance_max_samples must be an int or None, got "
+                    f"{type(self.importance_max_samples).__name__}."
+                )
+            # Lower bound of 2 explained in _subsample_for_importance.
+            if self.importance_max_samples < 2:
+                raise ValueError(
+                    f"importance_max_samples must be >= 2 or None, got "
+                    f"{self.importance_max_samples}."
+                )
         if self.include_shap:
             if self.shap_max_background < 1:
                 raise ValueError(

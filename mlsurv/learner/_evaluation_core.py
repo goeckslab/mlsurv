@@ -164,6 +164,7 @@ class CoreEvaluationMixin:
         y: np.ndarray | None = None,
         eval_times: np.ndarray | list | str | None = None,
         n_importance_repeats: int | str | dict = "auto",
+        importance_max_samples: int | None = None,
         include_shap: bool = False,
         shap_max_background: int = 50,
         shap_max_explain: int = 50,
@@ -231,6 +232,17 @@ class CoreEvaluationMixin:
             (the default), uses 10 repeats for all models.
             Pass a dict of {model_name: int} for per-model repeat counts;
             models not in the dict fall back to ``"auto"``.
+        importance_max_samples : int, optional
+            Cap on the test rows used for permutation importance. ``None``
+            (the default) uses every row. Permutation importance costs
+            ``n_features x n_repeats x (predict + C-index over n_test
+            rows)``, and the C-index term is superlinear in ``n_test``, so
+            on large cohorts importance can out-cost model fitting. A value
+            at or above the cohort size is a no-op; the minimum is 2. The
+            draw is seeded from
+            *random_state*, so with a seed set every model sees the same
+            rows and their importances stay comparable; without one, each
+            model draws its own subsample and mlsurv warns.
         include_shap : bool, default=False
             If True, compute SHAP values.
         shap_max_background : int, default=50
@@ -401,6 +413,7 @@ class CoreEvaluationMixin:
             eval_times=eval_times,
             extra_eval_times=self._state.user_extra_eval_times,
             n_importance_repeats=n_importance_repeats,
+            importance_max_samples=importance_max_samples,
             include_shap=include_shap,
             shap_max_background=shap_max_background,
             shap_max_explain=shap_max_explain,
@@ -534,6 +547,7 @@ class CoreEvaluationMixin:
             eval_times=eval_times,
             extra_eval_times=ctx.extra_eval_times,
             n_importance_repeats=ctx.n_importance_repeats,
+            importance_max_samples=ctx.importance_max_samples,
             include_shap=ctx.include_shap,
             shap_max_background=ctx.shap_max_background,
             shap_max_explain=ctx.shap_max_explain,

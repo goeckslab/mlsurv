@@ -1,5 +1,7 @@
 """Test evaluation functions for Phase 3."""
 
+import warnings
+
 import pytest
 import numpy as np
 import pandas as pd
@@ -832,6 +834,332 @@ class TestGetCoefficientsWithSelector:
         assert all(np.isnan(v) for v in result)
 
 
+class TestGetCoefficientsAlignment:
+    """_get_coefficients always returns len(features) values, keyed by name.
+
+    Every case here produced either a wrong-length list (which crashed
+    _build_importance_summary and discarded the whole importance result) or a
+    silently mis-assigned coefficient.
+    """
+
+    @staticmethod
+    def _model(feature_names, coefs):
+        """A CoxPH-like model whose get_coefficients() is name-indexed."""
+        names = np.array(feature_names)
+
+        class _CoxModel:
+            feature_names_in_ = names
+
+            def get_coefficients(self):
+                return pd.Series(coefs, index=self.feature_names_in_)
+
+        return _CoxModel()
+
+    @staticmethod
+    def _selector(features):
+        class _Selector:
+            selected_features_ = features
+        return _Selector()
+
+    def test_nested_selector_pipeline_resolves_coefficients(self):
+        """A chained selector (feature_selector=[...]) is wrapped in a Pipeline.
+
+        The wrapper carries no selected_features_; the last inner step that
+        does is the one the model actually saw.
+        """
+        from sklearn.pipeline import Pipeline
+        from mlsurv.evaluation.importance import _get_coefficients
+
+        inner = Pipeline([
+            ('sel_0', self._selector(['a', 'b', 'c'])),
+            ('sel_1', self._selector(['a', 'c'])),
+        ])
+        pipeline = Pipeline([
+            ('selector', inner),
+            ('model', self._model(['a', 'c'], [0.5, -0.3])),
+        ])
+
+        result = _get_coefficients(pipeline, ['a', 'b', 'c', 'd'])
+
+        assert len(result) == 4
+        assert result[0] == 0.5     # a
+        assert np.isnan(result[1])  # b dropped by the second selector
+        assert result[2] == -0.3    # c
+        assert np.isnan(result[3])  # d
+
+    def test_third_party_selector_via_names_out(self):
+        """SelectKBest & friends expose get_feature_names_out(), not selected_features_."""
+        from sklearn.pipeline import Pipeline
+        from mlsurv.evaluation.importance import _get_coefficients
+
+        class _NamesOutSelector:
+            def get_feature_names_out(self):
+                return np.array(['a', 'c'])
+
+        pipeline = Pipeline([
+            ('selector', _NamesOutSelector()),
+            ('model', self._model(['a', 'c'], [0.5, -0.3])),
+        ])
+
+        result = _get_coefficients(pipeline, ['a', 'b', 'c'])
+
+        assert len(result) == 3
+        assert result[0] == 0.5
+        assert np.isnan(result[1])
+        assert result[2] == -0.3
+
+    def test_coef_index_order_wins_over_selector_order(self):
+        """Some models reorder their coefficients relative to the selector.
+
+        lifelines' Weibull-AFT sorts its covariates, so keying by the
+        selector's order silently attaches each value to the wrong feature.
+        """
+        from sklearn.pipeline import Pipeline
+        from mlsurv.evaluation.importance import _get_coefficients
+
+        pipeline = Pipeline([
+            ('selector', self._selector(['a', 'b', 'c'])),
+            # Model returns them in a different order.
+            ('model', self._model(['b', 'a', 'c'], [2.0, 1.0, 3.0])),
+        ])
+
+        result = _get_coefficients(pipeline, ['a', 'b', 'c', 'd'])
+
+        assert result[0] == 1.0     # a, not 2.0
+        assert result[1] == 2.0     # b, not 1.0
+        assert result[2] == 3.0
+        assert np.isnan(result[3])
+
+    def test_unresolvable_selector_returns_nan_not_short_list(self):
+        """An opaque selector must yield NaNs, never a wrong-length list."""
+        from sklearn.pipeline import Pipeline
+        from mlsurv.evaluation.importance import _get_coefficients
+        from mlsurv._warnings import MetricFailureWarning
+
+        class _OpaqueSelector:
+            pass
+
+        class _UnnamedCoefModel:
+            coef_ = np.array([0.5, -0.3])
+
+        pipeline = Pipeline([
+            ('selector', _OpaqueSelector()),
+            ('model', _UnnamedCoefModel()),
+        ])
+
+        with pytest.warns(MetricFailureWarning):
+            result = _get_coefficients(pipeline, ['a', 'b', 'c'])
+
+        assert len(result) == 3
+        assert all(np.isnan(v) for v in result)
+
+    def test_length_mismatch_degrades_to_nan_with_warning(self):
+        """Selector names and coefficient count disagreeing is not fatal."""
+        from sklearn.pipeline import Pipeline
+        from mlsurv.evaluation.importance import _get_coefficients
+        from mlsurv._warnings import MetricFailureWarning
+
+        class _UnnamedCoefModel:
+            coef_ = np.array([0.5, -0.3, 0.1])
+
+        pipeline = Pipeline([
+            ('selector', self._selector(['a', 'b'])),  # 2 names vs 3 coefs
+            ('model', _UnnamedCoefModel()),
+        ])
+
+        with pytest.warns(MetricFailureWarning):
+            result = _get_coefficients(pipeline, ['a', 'b', 'c'])
+
+        assert len(result) == 3
+        assert all(np.isnan(v) for v in result)
+
+    def test_duplicate_selector_labels_degrade_to_nan(self):
+        """Duplicate labels would raise inside reindex; degrade instead."""
+        from sklearn.pipeline import Pipeline
+        from mlsurv.evaluation.importance import _get_coefficients
+        from mlsurv._warnings import MetricFailureWarning
+
+        class _UnnamedCoefModel:
+            coef_ = np.array([0.5, -0.3])
+
+        pipeline = Pipeline([
+            ('selector', self._selector(['a', 'a'])),
+            ('model', _UnnamedCoefModel()),
+        ])
+
+        with pytest.warns(MetricFailureWarning):
+            result = _get_coefficients(pipeline, ['a', 'b'])
+
+        assert len(result) == 2
+        assert all(np.isnan(v) for v in result)
+
+    def test_out_of_range_integer_indices_return_nan(self):
+        """An index past the end of the feature list must not raise IndexError."""
+        from sklearn.pipeline import Pipeline
+        from mlsurv.evaluation.importance import (
+            _get_coefficients, _get_selected_features,
+        )
+
+        class _UnnamedCoefModel:
+            coef_ = np.array([0.5, -0.3])
+
+        pipeline = Pipeline([
+            ('selector', self._selector([0, 99])),
+            ('model', _UnnamedCoefModel()),
+        ])
+
+        assert _get_selected_features(pipeline, ['a', 'b', 'c']) is None
+
+        from mlsurv._warnings import MetricFailureWarning
+
+        with pytest.warns(MetricFailureWarning):
+            result = _get_coefficients(pipeline, ['a', 'b', 'c'])
+
+        assert len(result) == 3
+        assert all(np.isnan(v) for v in result)
+
+    def test_extra_coefficient_labels_are_dropped_not_misplaced(self):
+        """Keying by name is correct per label, so a label the test set does
+        not have (an intercept, a scale term) simply drops out."""
+        from sklearn.pipeline import Pipeline
+        from mlsurv.evaluation.importance import _get_coefficients
+
+        pipeline = Pipeline([
+            ('model', self._model(['a', 'b', 'Intercept'], [1.0, 2.0, 9.9])),
+        ])
+
+        result = _get_coefficients(pipeline, ['a', 'b', 'c'])
+
+        assert result[0] == 1.0
+        assert result[1] == 2.0
+        assert np.isnan(result[2])  # 'c' has no coefficient; 9.9 never lands
+
+    def test_labels_matching_nothing_warn_instead_of_going_quiet(self):
+        """A selector reporting names from another feature space produces an
+        all-NaN column, and the user has to hear about it."""
+        from sklearn.pipeline import Pipeline
+        from mlsurv.evaluation.importance import _get_coefficients
+        from mlsurv._warnings import MetricFailureWarning
+
+        class _UnnamedCoefModel:
+            coef_ = np.array([0.5, -0.3])
+
+        pipeline = Pipeline([
+            ('selector', self._selector(['x0', 'x2'])),
+            ('model', _UnnamedCoefModel()),
+        ])
+
+        with pytest.warns(MetricFailureWarning):
+            result = _get_coefficients(pipeline, ['a', 'b', 'c'])
+
+        assert len(result) == 3
+        assert all(np.isnan(v) for v in result)
+
+    def test_nested_pipeline_uses_the_final_step_names(self):
+        """A third-party step that narrows further, last in the chain, wins.
+
+        Asking the inner steps for selected_features_ first would stop at the
+        mlsurv selector's stale, too-long list.
+        """
+        from sklearn.pipeline import Pipeline
+        from mlsurv.evaluation.importance import _get_selected_features
+
+        class _MlsurvStyleSelector:
+            """Like mlsurv's own selectors: both attributes, kept in sync."""
+
+            selected_features_ = ['a', 'b', 'c']
+
+            def get_feature_names_out(self, input_features=None):
+                return np.array(self.selected_features_)
+
+        class _NamesOutOnly:
+            """Third-party-style: names out, no selected_features_."""
+
+            def get_feature_names_out(self, input_features=None):
+                return np.array(['a'])
+
+        inner = Pipeline([
+            ('sel_0', _MlsurvStyleSelector()),
+            ('sel_1', _NamesOutOnly()),
+        ])
+        pipeline = Pipeline([
+            ('selector', inner),
+            ('model', self._model(['a'], [0.5])),
+        ])
+
+        assert _get_selected_features(pipeline, ['a', 'b', 'c', 'd']) == ['a']
+
+    def test_model_without_coefficients_stays_silent(self):
+        """Trees and deep models have no coefficients by design.
+
+        `get_coefficients()` returning None is the normal case, not a
+        failure, so it must not warn: otherwise every RSF and DeepSurv run
+        would emit one.
+        """
+        from sklearn.pipeline import Pipeline
+        from mlsurv.evaluation.importance import _get_coefficients
+
+        class _TreeLikeModel:
+            def get_coefficients(self):
+                return None
+
+        pipeline = Pipeline([('model', _TreeLikeModel())])
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            result = _get_coefficients(pipeline, ['a', 'b', 'c'])
+
+        assert len(result) == 3
+        assert all(np.isnan(v) for v in result)
+        assert caught == []
+
+    def test_degenerate_coefficients_report_the_right_cause(self):
+        """All-NaN coefficient values are not a label problem."""
+        from sklearn.pipeline import Pipeline
+        from mlsurv.evaluation.importance import _get_coefficients
+        from mlsurv._warnings import MetricFailureWarning
+
+        pipeline = Pipeline([
+            ('model', self._model(['a', 'b'], [np.nan, np.nan])),
+        ])
+
+        with pytest.warns(MetricFailureWarning) as record:
+            result = _get_coefficients(pipeline, ['a', 'b'])
+
+        assert all(np.isnan(v) for v in result)
+        assert any("finite" in str(w.message) for w in record)
+
+    def test_non_numeric_coefficients_do_not_raise(self):
+        """_get_coefficients promises never to raise."""
+        from sklearn.pipeline import Pipeline
+        from mlsurv.evaluation.importance import _get_coefficients
+        from mlsurv._warnings import MetricFailureWarning
+
+        pipeline = Pipeline([
+            ('model', self._model(['a', 'b'], ['x', 'y'])),
+        ])
+
+        with pytest.warns(MetricFailureWarning):
+            result = _get_coefficients(pipeline, ['a', 'b'])
+
+        assert len(result) == 2
+        assert all(np.isnan(v) for v in result)
+
+    def test_zero_length_coefficients_warns(self):
+        """An empty coefficient vector is a failure, not a silent NaN column."""
+        from sklearn.pipeline import Pipeline
+        from mlsurv.evaluation.importance import _get_coefficients
+        from mlsurv._warnings import MetricFailureWarning
+
+        pipeline = Pipeline([('model', self._model([], []))])
+
+        with pytest.warns(MetricFailureWarning):
+            result = _get_coefficients(pipeline, ['a', 'b'])
+
+        assert len(result) == 2
+        assert all(np.isnan(v) for v in result)
+
+
 class TestGetCoefficientsErrorHandling:
     """Test error handling and logging in _get_coefficients and _get_selected_features."""
 
@@ -839,51 +1167,73 @@ class TestGetCoefficientsErrorHandling:
         """get_coefficients() raising returns NaN list."""
         from sklearn.pipeline import Pipeline
         from mlsurv.evaluation.importance import _get_coefficients
+        from mlsurv._warnings import MetricFailureWarning
 
         class FailingModel:
             def get_coefficients(self):
                 raise ValueError("model not fitted")
 
         pipeline = Pipeline([('model', FailingModel())])
-        result = _get_coefficients(pipeline, ['a', 'b', 'c'])
+        with pytest.warns(MetricFailureWarning):
+            result = _get_coefficients(pipeline, ['a', 'b', 'c'])
 
         assert len(result) == 3
         assert all(np.isnan(v) for v in result)
 
-    def test_get_coefficients_method_raises_logs_warning(self, caplog):
-        """get_coefficients() failure logs WARNING with model type name."""
-        import logging
+    def test_get_coefficients_method_raises_warns_user(self):
+        """A failed extraction reaches the user, not just the log.
+
+        It used to log at WARNING only, which CONTRIBUTING calls out as not
+        reaching users.
+        """
         from sklearn.pipeline import Pipeline
         from mlsurv.evaluation.importance import _get_coefficients
+        from mlsurv._warnings import MetricFailureWarning
 
         class FailingModel:
             def get_coefficients(self):
                 raise ValueError("model not fitted")
 
         pipeline = Pipeline([('model', FailingModel())])
-        with caplog.at_level(logging.WARNING, logger="mlsurv.importance"):
-            _get_coefficients(pipeline, ['a', 'b'])
+        with pytest.warns(MetricFailureWarning) as record:
+            _get_coefficients(pipeline, ['a', 'b'], model_name='coxph')
 
-        assert any("FailingModel" in r.message for r in caplog.records)
-        assert any("model not fitted" in r.message for r in caplog.records)
+        messages = [str(w.message) for w in record]
+        assert any("FailingModel" in m for m in messages)
+        assert any("model not fitted" in m for m in messages)
+        # Named per model, so IterativeWarning dedup can't silence the rest.
+        assert any("coxph" in m for m in messages)
 
-    def test_get_coefficients_method_catches_broad_exceptions(self, caplog):
+    def test_get_coefficients_method_catches_broad_exceptions(self):
         """get_coefficients() path catches TypeError (beyond ValueError/AttributeError)."""
-        import logging
         from sklearn.pipeline import Pipeline
         from mlsurv.evaluation.importance import _get_coefficients
+        from mlsurv._warnings import MetricFailureWarning
 
         class TypeErrorModel:
             def get_coefficients(self):
                 raise TypeError("unexpected type")
 
         pipeline = Pipeline([('model', TypeErrorModel())])
-        with caplog.at_level(logging.WARNING, logger="mlsurv.importance"):
+        with pytest.warns(MetricFailureWarning) as record:
             result = _get_coefficients(pipeline, ['a', 'b'])
 
         assert len(result) == 2
         assert all(np.isnan(v) for v in result)
-        assert any("TypeErrorModel" in r.message for r in caplog.records)
+        assert any("TypeErrorModel" in str(w.message) for w in record)
+
+    def test_get_coefficients_lets_real_bugs_escape(self):
+        """A bug inside a wrapper must not become a quiet NaN column."""
+        from sklearn.pipeline import Pipeline
+        from mlsurv.evaluation.importance import _get_coefficients
+
+        class BuggyModel:
+            def get_coefficients(self):
+                undefined_name  # noqa: F821 (deliberate NameError)
+
+        pipeline = Pipeline([('model', BuggyModel())])
+        with pytest.raises(NameError):
+            _get_coefficients(pipeline, ['a', 'b'])
 
     def test_coef_fallback_exception_returns_nan(self):
         """coef_ fallback path exception returns NaN list."""
@@ -899,21 +1249,22 @@ class TestGetCoefficientsErrorHandling:
         assert len(result) == 3
         assert all(np.isnan(v) for v in result)
 
-    def test_coef_fallback_exception_logs_warning(self, caplog):
-        """coef_ fallback path exception logs WARNING with model type."""
-        import logging
+    def test_coef_fallback_exception_warns_user(self):
+        """coef_ fallback path exception reaches the user with the cause."""
         from sklearn.pipeline import Pipeline
         from mlsurv.evaluation.importance import _get_coefficients
+        from mlsurv._warnings import MetricFailureWarning
 
         class BadCoefModel:
             coef_ = [0.1, 0.2]  # list has no .ndim → AttributeError
 
         pipeline = Pipeline([('model', BadCoefModel())])
-        with caplog.at_level(logging.WARNING, logger="mlsurv.importance"):
+        with pytest.warns(MetricFailureWarning) as record:
             _get_coefficients(pipeline, ['a', 'b'])
 
-        assert any("BadCoefModel" in r.message for r in caplog.records)
-        assert any("ndim" in r.message for r in caplog.records)
+        messages = [str(w.message) for w in record]
+        assert any("BadCoefModel" in m for m in messages)
+        assert any("ndim" in m for m in messages)
 
     def test_selected_features_missing_returns_none(self):
         """Selector step without selected_features_ returns None."""

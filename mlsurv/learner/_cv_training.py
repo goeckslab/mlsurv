@@ -679,7 +679,7 @@ class CvTrainingMixin:
         shap_max_background, shap_max_explain,
         show_eval_progress, verbose, bootstrap, n_bootstrap, bootstrap_metrics,
         include_interactions=False, interaction_top_k=5, interaction_max_samples=100,
-        interaction_method='hstat',
+        interaction_method='hstat', importance_max_samples=None,
     ):
         """Evaluate all models on the test set.
 
@@ -690,6 +690,7 @@ class CvTrainingMixin:
             model_results,
             eval_times=eval_times,
             n_importance_repeats=n_importance_repeats,
+            importance_max_samples=importance_max_samples,
             include_shap=include_shap,
             shap_max_background=shap_max_background,
             shap_max_explain=shap_max_explain,

@@ -30,6 +30,7 @@ class EvalContext:
     # the resolved base grid and clipped at the engine materialization site.
     extra_eval_times: Any = None
     n_importance_repeats: Any = "auto"
+    importance_max_samples: Optional[int] = None
     include_shap: bool = False
     shap_max_background: int = 50
     shap_max_explain: int = 50

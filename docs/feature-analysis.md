@@ -35,6 +35,23 @@ print(result.evaluation.importance)  # DataFrame: model_type, feature, coefficie
 learner.importance('rsf', method='permutation', n_importance_repeats=50)
 ```
 
+#### Cost on large cohorts
+
+Permutation importance costs `n_features x n_repeats x (predict + C-index over n_test rows)`. The C-index term is superlinear in the number of test rows, so on large cohorts importance can take longer than fitting the models. Two levers:
+
+```python
+# 1. Compute importance on a capped, seeded subsample of the test set.
+learner.setup(random_state=42)   # the cap draws from this seed
+learner.evaluate(importance_max_samples=1000)
+
+# 2. Skip it during an expensive sweep, then compute it on demand later,
+#    including from a learner reloaded with load_learner().
+learner.evaluate(n_importance_repeats=0)
+learner.importance('coxph', method='permutation')
+```
+
+`importance_max_samples` defaults to `None`, which uses every row. A value at or above the cohort size is a no-op, and the minimum is 2 (the C-index needs a pair of rows to compare). The draw is seeded from `random_state`, so with a seed set all features within a model, and all models in the call, are scored on the same rows and their importances stay comparable. Without a seed each model draws its own subsample; mlsurv warns when that happens. Permutation importance is a ranking diagnostic that tolerates subsampling well: the cost is a little precision in the importance estimate, not in the model.
+
 ### Grouped Importance
 
 For one-hot encoded categorical features, grouped importance permutes all dummy columns jointly and reports a single aggregated score per original variable<sup>[2](#references),[3](#references)</sup>:
