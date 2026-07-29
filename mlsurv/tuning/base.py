@@ -342,6 +342,12 @@ class BaseTuner:
         self._selector = selector
         self._trial_warnings = {}
         self._trial_warnings_lock = threading.Lock()
+        # Optional cross-phase FitFailureWarning dedup set, bound to the
+        # learner's ``LearnerState.fit_failure_warned`` by
+        # ``_create_tuner_for_model``. ``None`` when the tuner is constructed
+        # standalone (direct instantiation, unit tests), in which case
+        # ``_emit_trial_warnings`` behaves exactly as it did before.
+        self._seen_warning_keys = None
         # Per-trial failure messages (keyed by message string -> count), used to
         # surface the dominant cause when 100% of trials fail. Optuna
         # does not store trial exceptions on the FrozenTrial, so we capture them
@@ -539,11 +545,37 @@ class BaseTuner:
                 self._trial_warnings[key] = self._trial_warnings.get(key, 0) + 1
 
     def _emit_trial_warnings(self):
-        """Re-emit each unique warning once, annotated with count, then clear."""
+        """Re-emit each unique warning once, annotated with count, then clear.
+
+        ``FitFailureWarning``s are additionally deduplicated against
+        ``self._seen_warning_keys`` (the learner's
+        ``LearnerState.fit_failure_warned``), so the same numerical-instability
+        message does not surface a second time from the post-tune CV re-run or
+        the final full-train fit.
+
+        The key added to that set is the *unsuffixed* ``(category.__name__,
+        msg)``. The ``" (xN)"`` suffix is presentation only: the CV path builds
+        its keys from raw messages, so a suffixed key would never match and the
+        dedup would silently do nothing. Same contract as
+        ``_warnings._reemit_deduped_warnings``.
+
+        Only ``FitFailureWarning`` takes part here. The set itself is not
+        scoped to that category: the CV path stores a key for every warning it
+        re-emits, so widening this check would suppress unrelated warnings such
+        as CoxPH's ridge-penalty ``MethodologicalWarning``.
+        """
+        from .._warnings import FitFailureWarning
+
         with self._trial_warnings_lock:
             snapshot = dict(self._trial_warnings)
             self._trial_warnings.clear()
+        seen = self._seen_warning_keys
         for (category, msg), count in snapshot.items():
+            if seen is not None and issubclass(category, FitFailureWarning):
+                key = (category.__name__, msg)
+                if key in seen:
+                    continue
+                seen.add(key)
             suffix = f" (x{count})" if count > 1 else ""
             warnings.warn(f"{msg}{suffix}", category=category, stacklevel=2)
 

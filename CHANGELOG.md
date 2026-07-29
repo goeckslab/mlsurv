@@ -5,6 +5,41 @@ All notable changes to mlsurv are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **CoxPH is no longer dropped from cross-validation and tuning on
+  near-singular designs.** When the Cox optimizer's solver failed, only some of
+  the possible error messages routed into the automatic regularization
+  fallback; scipy's "LAPACK reported an illegal value" wording did not, so the
+  fit aborted, every tuning trial was pruned, and the model was dropped from
+  the results. The classification now also covers scipy's LAPACK
+  illegal-value wording, and the fallback escalates through `0.01`, `0.1`, and
+  `1.0`, keeping the first penalty that fits. Each rung is floored at any
+  `alpha` you supplied, so a user-chosen penalty is never silently weakened.
+- **Bad input is no longer reported as a degenerate design.** A NaN or infinite
+  value in `X` produced "Data may be too degenerate for Cox PH", hiding
+  scikit-learn's far more useful message naming the offending input. Input and
+  parameter errors now propagate unchanged.
+- **`FitFailureWarning` now surfaces at most once per distinct message per
+  learner.** The tuning phase kept its own warning tally, so a `tune()` call
+  could report the same numerical-instability message twice: once from the
+  Optuna trials and once from the cross-validation re-run. Tuning now shares
+  the learner's already-seen set with cross-validation, the final fit, and
+  calibration.
+
+### Changed
+
+- **Hazard ratios are suppressed when CoxPH escalates past `alpha=0.01`.** If
+  an unstable fit needs `0.1` or `1.0` to converge, the coefficients are shrunk
+  enough that hazard ratios, Wald confidence intervals, and p-values are
+  conditional on the penalty rather than unbiased multivariable estimates, so
+  the coefficient table and forest plot are left out and a
+  `MethodologicalWarning` explains why. The C-index and survival probabilities
+  are unaffected. Escalating to `0.01`, the only previous fallback, is
+  unchanged.
+
 ## [0.1.0] - 2026-06-25
 
 Initial public release of mlsurv, a low-code machine learning package for

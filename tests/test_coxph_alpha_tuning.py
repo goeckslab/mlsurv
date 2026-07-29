@@ -92,9 +92,9 @@ def test_negative_alpha_rejected_on_fit(small_data):
     """A negative ridge penalty must raise on fit, not silently fall back.
 
     Boundary case (CONTRIBUTING.md): sksurv rejects alpha<0 with an
-    InvalidParameterError (a ValueError subclass), and the message carries no
-    nan/infinite/singular token, so coxph's _fit_and_check re-raises it
-    instead of routing it into the alpha=0.01 numerical-stability fallback.
+    InvalidParameterError (a ValueError subclass), which coxph's
+    _fit_and_check classifies as a caller error and re-raises instead of
+    routing it into the escalating alpha fallback.
     The ridge caveat (gated on ``alpha > 0``) must not fire for a negative.
     """
     X, y = small_data

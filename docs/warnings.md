@@ -23,6 +23,26 @@ The concrete categories `ClampWarning`, `FitFailureWarning`,
 `IterativeWarning` mixin, so a filter on either the tier or `IterativeWarning`
 catches them.
 
+`FitFailureWarning` is deduplicated on top of the filters. A model fit happens
+many times per learner (once per tuning trial, once per CV fold, once for the
+final full-train fit, again for calibration), so a single unstable design could
+otherwise print the same line dozens of times. The learner keeps track of which
+messages it has already shown and skips repeats, so you get one line per
+distinct message even where the `IterativeWarning` "once" filter is reset by
+the machinery that captures warnings out of worker processes.
+
+Both layers key on the message text, and Python's own "once" filter resets
+whenever the filter list changes, which mlsurv does often while capturing
+warnings out of worker processes. So a repeat may or may not print. If you are
+fitting many learners in a loop (a leave-one-group-out sweep, say) and need to
+know which cohorts were affected, don't count lines. Ask each model:
+
+```python
+model = learner.models['coxph'].model.named_steps['model']
+model.overflow_detected_   # True if the fallback engaged
+model.alpha_               # the penalty it settled on
+```
+
 ## Recipes
 
 Silence one tier (keep the rest):

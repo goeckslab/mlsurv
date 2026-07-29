@@ -466,8 +466,11 @@ class SurvivalLearner(
         multivariable fits use the training split, while
         ``univariate_cox`` uses the full cohort — the p-value columns of
         the two tables are not strictly comparable. When CoxPH's
-        automatic ridge fallback engaged (``alpha_ > 0``), CIs/p-values
-        are conditional on the regularization strength.
+        automatic ridge fallback engaged at its first rung
+        (``alpha_ == 0.01``), CIs/p-values are conditional on that
+        regularization strength. If the fallback had to escalate further,
+        those columns are NaN rather than conditional: see
+        ``CoxPHModel.hazard_ratio_valid``.
 
         Returns
         -------

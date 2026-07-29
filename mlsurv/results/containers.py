@@ -940,8 +940,11 @@ class ModelResult(DictExportMixin):
         multivariable fit uses the training split, while
         ``univariate_cox`` uses the full cohort — the two tables are not
         strictly comparable. When CoxPH's automatic ridge fallback
-        engaged (``alpha_ > 0``), CIs/p-values are conditional on the
-        regularization strength (same convention as the forest plots).
+        engaged at its first rung (``alpha_ == 0.01``), CIs/p-values are
+        conditional on that regularization strength (same convention as
+        the forest plots). If the fallback had to escalate further, the
+        hazard-ratio, CI, and p-value columns are NaN rather than
+        conditional: see ``CoxPHModel.hazard_ratio_valid``.
 
         See Also
         --------

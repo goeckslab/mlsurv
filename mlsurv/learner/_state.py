@@ -161,11 +161,18 @@ class LearnerState:
     reference_overlap_warned: Set[frozenset] = field(default_factory=set)
 
     # -- FitFailureWarning cross-call dedup -----------------------
-    # Set of ``(category_name, message)`` keys for FitFailureWarning copies
-    # already surfaced this session. Shared across CV training, the final
-    # full-train fit, and calibration OOF refits so the user sees
-    # one line per distinct numerical-instability message per learner —
-    # not one per call site. Cleared in ``_reset_state_if_needed`` on
+    # Set of ``(category_name, message)`` keys for warning copies already
+    # surfaced this session. Named for its main job, deduplicating
+    # FitFailureWarning, but the CV path stores a key for every warning it
+    # re-emits, so other categories land here too. Shared across Optuna trials
+    # (``BaseTuner._emit_trial_warnings``, bound in
+    # ``_create_tuner_for_model``), CV training, the final full-train fit, and
+    # calibration OOF refits so the user sees one line per distinct
+    # numerical-instability message per learner, not one per call site.
+    # Keys are always the *unsuffixed* ``(category_name, message)``: the
+    # ``" (xN)"`` and ``" (N occurrences across K <scope>)"`` counts are
+    # appended at emit time and must never enter a key, or the phases stop
+    # matching each other. Cleared in ``_reset_state_if_needed`` on
     # ``setup()`` re-init.
     fit_failure_warned: Set[tuple] = field(default_factory=set)
 

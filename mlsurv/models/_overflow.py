@@ -29,6 +29,68 @@ _ILL_CONDITIONED_RE = re.compile(r"ill[-\s]?conditioned matrix", re.IGNORECASE)
 # here.
 _CONVERGENCE_RE = re.compile(r"Optimization did not converge")
 
+# Bad input and bad arguments, checked BEFORE _SOLVER_FAILURE_RE below.
+# sklearn validates X, y, and the constructor parameters before the Cox
+# optimizer ever runs, and several of its messages use the word "nan", so a
+# keyword test alone would mistake them for solver failures.
+# No amount of regularization fixes a NaN cell or a negative alpha, and these
+# messages are the most actionable ones in the stack (sklearn's even links to
+# the imputation docs), so they must reach the user with their text intact:
+#
+#   sklearn check_array   "Input X contains NaN. CoxPHSurvivalAnalysis does
+#                          not accept missing values encoded as NaN ..."
+#                         "Input contains infinity or a value too large for
+#                          dtype('float64')."
+#   sklearn params        "The 'alpha' parameter of CoxPHSurvivalAnalysis must
+#                          be a float in the range [0.0, inf) ... Got nan
+#                          instead."
+#   sksurv coxph.py       "alpha must be positive, but was -0.5"
+#                         "Length alphas (3) must match number of features (5)."
+_CALLER_ERROR_RE = re.compile(
+    r"Input (?:X |y )?contains"                    # sklearn check_array
+    r"|parameter of \w+ must be"                   # sklearn param validation
+    r"|alpha must be positive"                     # sksurv
+    r"|Length alphas",                             # sksurv
+    re.IGNORECASE,
+)
+
+# ``ValueError`` messages that mean "the Cox optimizer or the solver inside it
+# failed for numerical reasons", so CoxPHModel should route them into its
+# escalating alpha fallback instead of letting them abort the fit. Three
+# upstream sources, all from the Newton step in
+# ``CoxPHSurvivalAnalysis.fit``, which calls
+# ``solve(hessian, gradient, check_finite=False)``:
+#
+#   scipy _basic.py::_solve_check, info < 0
+#                         ValueError("LAPACK reported an illegal value in
+#                                     {-info}-th argument.")
+#   scipy _basic.py::_solve_check, info > 0 (or rcond == 0)
+#                         LinAlgError("Matrix is singular.")
+#   sksurv coxph.py       ValueError("search direction contains NaN or
+#                                     infinite values")
+#                         Raised after solve() returns: check_finite=False lets
+#                         a non-finite step through, and sksurv catches it with
+#                         its own isfinite guard.
+#
+# ``numpy.linalg.LinAlgError`` subclasses ``ValueError`` (numpy 2.4.4), so the
+# singular case arrives at ``except ValueError`` as well. The fourth
+# alternative covers scipy's "ill-conditioned matrix" text, which is normally a
+# ``LinAlgWarning`` (see _ILL_CONDITIONED_RE above) but becomes a ValueError
+# for anyone running with warnings-as-errors. Versions checked: sksurv 0.27.0,
+# scipy 1.17.1, numpy 2.4.4.
+#
+# Word boundaries on ``nan`` are deliberate: a bare ``"nan" in msg`` substring
+# test would also fire on words like "maintenance" or "nanosecond".
+_SOLVER_FAILURE_RE = re.compile(
+    r"\bnans?\b"                                   # "contains NaN or ..."
+    r"|\binfinite\b"                               # "... or infinite values"
+    r"|\bsingular\b"                               # "Matrix is singular."
+    r"|\bill[-\s]?conditioned\b"                   # warnings-as-errors
+    r"|lapack\s+reported"                          # _solve_check, info < 0
+    r"|illegal\s+value\s+in\s+-?\d+\s*-th\s+argument",
+    re.IGNORECASE,
+)
+
 # Module-level dedup for non-finite predict warnings, keyed by
 # (model_display_name, func_name). Without this, bootstrap (200+ iters)
 # and CV folds would emit one warning per call when a model has a

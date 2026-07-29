@@ -145,6 +145,12 @@ class _TrainedDetailsSubsection:
             )
         else:
             md_lines.append("**Convergence:** Model converged normally.")
+        # Say why the hazard-ratio table and forest plot are missing. The
+        # warning that explains it fires at fit time, long before the report is
+        # written, so without this the section is just an unexplained gap.
+        if getattr(model, 'hr_suppressed_reason_', None):
+            md_lines.append("")
+            md_lines.append(f"**Hazard ratios:** {model.hr_suppressed_reason_}")
         md_lines.append("")
 
     def _add_coxnet_details(self, md_lines, model):

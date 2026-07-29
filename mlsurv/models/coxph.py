@@ -10,9 +10,11 @@ from sksurv.linear_model.coxph import CoxPHOptimizer
 
 from mlsurv.models.base import BaseSurvivalModel, SurvivalArray
 from mlsurv.models._overflow import (
+    _CALLER_ERROR_RE,
     _CONVERGENCE_RE,
     _ILL_CONDITIONED_RE,
     _OVERFLOW_RE,
+    _SOLVER_FAILURE_RE,
     predict_with_clamp,
     reemit_non_overflow,
 )
@@ -22,7 +24,39 @@ from mlsurv._warnings import (
     SuggestionWarning,
 )
 
-_FALLBACK_ALPHA = 0.01
+_FALLBACK_ALPHAS = (0.01, 0.1, 1.0)
+# First rung, kept as a module-level alias: existing imports and tests refer to
+# the single fallback penalty by this name.
+_FALLBACK_ALPHA = _FALLBACK_ALPHAS[0]
+
+
+def _fallback_ladder(alpha):
+    """Escalating fallback penalties, never weaker than the user's ``alpha``.
+
+    Each rung is ``max(alpha, step)``, so ``CoxPHModel(alpha=0.5)`` escalates
+    to 1.0 and is never silently downgraded to 0.01. Rungs that collapse onto
+    the user's own alpha are dropped: re-running the identical deterministic
+    fit would fail identically, so it would only cost time and muddy the
+    warning text.
+
+    The guard is ``alpha > 0``, never ``if alpha``. ``0`` and ``0.0`` are the
+    documented default (unregularized), not "unset", and both are falsy.
+
+    The rungs match the penalizer ladder ``_fit_cox_with_fallback`` uses in
+    ``evaluation/metrics.py``; keep the two in step.
+
+    Returns an empty list when ``alpha`` already meets or exceeds the top rung.
+    There is no stronger penalty to escalate to, so the caller keeps a fit that
+    only warned and raises only when the optimizer failed outright.
+    """
+    alpha = float(alpha)
+    ladder = []
+    for step in _FALLBACK_ALPHAS:
+        eff = max(alpha, float(step))
+        if alpha > 0 and eff <= alpha:
+            continue
+        ladder.append(eff)
+    return ladder
 
 
 class CoxPHModel(BaseSurvivalModel):
@@ -35,12 +69,19 @@ class CoxPHModel(BaseSurvivalModel):
 
     When ``alpha=0`` (unregularized), the optimizer can diverge on small or
     collinear folds during cross-validation, producing either RuntimeWarnings
-    (overflow in exp, divide by zero) or a ``ValueError`` from sksurv when the
-    search direction contains NaN.  By default, if numerical instability is
-    detected the model automatically re-fits with a small regularization
-    penalty (``alpha=0.01``) to produce valid survival probabilities.  Set
-    ``force=True`` to keep the original fit (C-index remains valid but
-    survival function predictions may be unreliable).
+    (overflow in exp, divide by zero) or a ``ValueError``: from sksurv when
+    the search direction contains NaN, or from scipy's solver when LAPACK
+    reports an illegal value or a singular matrix.  By default, if numerical
+    instability is detected the model automatically re-fits with an escalating
+    L2 penalty (``0.01``, then ``0.1``, then ``1.0``), keeping the first
+    penalty that fits, so a near-singular design yields a usable model instead
+    of a dropped one.  Each rung is ``max(alpha, rung)``, so a user-supplied
+    ``alpha`` is never weakened (``alpha=0.5`` escalates to ``1.0``, never down
+    to ``0.01``).  When ``alpha`` already meets or exceeds the top rung there
+    is nothing to escalate to: a fit that only warned is kept, and a fit that
+    failed outright raises ``RuntimeError``.  Set ``force=True`` to keep the
+    original fit (C-index remains valid but survival function predictions may
+    be unreliable).
 
     Parameters
     ----------
@@ -61,7 +102,9 @@ class CoxPHModel(BaseSurvivalModel):
         Whether the model has been fitted.
     alpha_ : float
         The effective regularization used for fitting. Equals ``alpha``
-        unless a fallback was triggered, in which case it is ``0.01``.
+        unless a fallback was triggered, in which case it is the first rung
+        of ``_FALLBACK_ALPHAS`` (``0.01``, ``0.1``, ``1.0``) above ``alpha``
+        that produced a usable fit.
     overflow_detected_ : bool
         True if numerical instability was detected during fitting
         (overflow warnings or optimizer ValueError).
@@ -103,13 +146,15 @@ class CoxPHModel(BaseSurvivalModel):
         conditional on the penalty strength, so this returns False and
         downstream evaluation/viz suppress the hazard-ratio output.
 
-        Gated on the constructor ``alpha`` (user intent), not the effective
-        ``alpha_``: the automatic ridge fallback (``alpha=0 -> alpha_=0.01``
-        on numerically unstable folds) leaves this True, preserving existing
-        behavior for that path (its conditional CIs are noted in
-        ``_attach_covariance``).
+        The automatic fallback is allowed one exception. Escalating to the
+        first rung (``0.01``) leaves this True: the shrinkage at that penalty
+        is negligible on a standardized design, and its conditional CIs are
+        noted in ``_attach_covariance``. Escalating further (``0.1``, ``1.0``)
+        shrinks coefficients enough to matter, so this turns False and the
+        hazard-ratio table and forest plot are suppressed rather than
+        presenting penalized estimates as unbiased ones.
         """
-        return self.alpha == 0
+        return self.alpha == 0 and getattr(self, "alpha_", 0) <= _FALLBACK_ALPHAS[0]
 
     def __init__(self, alpha=0, force=False):
         self.alpha = alpha
@@ -122,9 +167,11 @@ class CoxPHModel(BaseSurvivalModel):
 
         If numerical instability is detected (overflow warnings or optimizer
         ValueError) and ``force`` is False, the model is automatically
-        re-fitted with ``alpha=0.01``.  When the optimizer raises a
-        ``ValueError`` (fit failed entirely), fallback always applies
-        regardless of ``force`` — there is no model to keep.
+        re-fitted with an escalating L2 penalty (``0.01``, ``0.1``, ``1.0``),
+        keeping the first penalty that fits.  Each rung is floored at the
+        user's ``alpha``, so a supplied penalty is never weakened.  When the
+        optimizer raises a ``ValueError`` (fit failed entirely), fallback
+        always applies regardless of ``force`` (there is no model to keep).
 
         Parameters
         ----------
@@ -141,13 +188,21 @@ class CoxPHModel(BaseSurvivalModel):
         Raises
         ------
         RuntimeError
-            If the regularized fallback fit also fails, indicating the data
-            is too degenerate for Cox PH.
+            If every rung of the escalating fallback ladder also fails,
+            indicating the data is too degenerate for Cox PH; or if the
+            optimizer failed outright and ``alpha`` already meets or exceeds
+            the top rung, leaving no stronger penalty to escalate to and no
+            fitted model to keep. Not raised when the fit succeeded and only
+            warned, or when ``force=True`` kept the original fit.
         """
         self._validate_data(X, y)
         self.alpha_ = self.alpha
         self.model_ = CoxPHSurvivalAnalysis(alpha=self.alpha)
         self.overflow_detected_ = False
+        self._last_solver_error_ = None
+        # Set only when the fallback escalates far enough to invalidate
+        # hazard-ratio inference; read by the report's model-details section.
+        self.hr_suppressed_reason_ = None
 
         if self.alpha > 0:
             # A user-specified ridge penalty (e.g. from tuning an explicit
@@ -202,17 +257,99 @@ class CoxPHModel(BaseSurvivalModel):
             self._attach_covariance(X, y)
             return self
 
-        # Fallback: re-fit with regularization.
+        # Fallback: re-fit with escalating regularization, taking the first
+        # penalty that fits.
         _cause_hint = (
             " This typically indicates collinear features, a near-singular "
             "design matrix, or a high feature-to-sample ratio. Consider "
             "using CoxNet with L1 regularization for automatic feature selection."
         )
+
+        ladder = _fallback_ladder(self.alpha)
+        no_escalation = (
+            f"CoxPH(alpha={self.alpha}) hit numerical instability, but alpha "
+            f"is already at or above the top of the automatic fallback ladder "
+            f"({_FALLBACK_ALPHAS[-1]:g}), so there is no stronger penalty to "
+            f"escalate to. Weakening your alpha is never done automatically."
+        )
+        if not ladder and not fit_failed:
+            # The original fit produced a usable model and only warned, so keep
+            # it rather than throwing it away, the same trade-off force=True
+            # makes. Raising here would fail the CV fold and could drop CoxPH
+            # from the results, which is the outcome the fallback exists to
+            # prevent.
+            warnings.warn(
+                no_escalation + " Keeping the original fit: the C-index is "
+                "valid, but survival function predictions may be unreliable."
+                + _cause_hint,
+                FitFailureWarning,
+                stacklevel=2,
+            )
+            self.is_fitted_ = True
+            self._attach_covariance(X, y)
+            return self
+        if not ladder:
+            raise RuntimeError(
+                no_escalation + " The fit produced no model to keep."
+                + _cause_hint
+            )
+
+        winner, winner_warned, winner_convergence = None, False, False
+        # (alpha, message) for the most recent rung that reported a solver
+        # failure, so the ladder-exhausted error can quote a real cause. Seeded
+        # from the initial fit, whose text _fit_and_check already stashed.
+        last_failure = (
+            (self.alpha, self._last_solver_error_)
+            if fit_failed and self._last_solver_error_ is not None else None
+        )
+        for eff_alpha in ladder:
+            # alpha_ and model_ are rebound together on every rung so
+            # _attach_covariance's penalty vector always matches the alpha
+            # that actually produced coef_.
+            self.alpha_ = eff_alpha
+            self.model_ = CoxPHSurvivalAnalysis(alpha=eff_alpha)
+            self._last_solver_error_ = None
+            # No except clause: _fit_and_check turns solver failures into
+            # fb_failed and re-raises everything else on purpose, so anything
+            # propagating from here is a caller error or an unrecognized
+            # failure that the user needs to see, not a reason to try a
+            # stronger penalty.
+            fb_failed, fb_warnings, fb_convergence = self._fit_and_check(X, y)
+            if fb_failed:
+                if self._last_solver_error_ is not None:
+                    last_failure = (eff_alpha, self._last_solver_error_)
+                continue
+            winner, winner_warned = eff_alpha, fb_warnings
+            winner_convergence = fb_convergence
+            break
+
+        if winner is None:
+            tried = ", ".join(f"alpha={a:g}" for a in ladder)
+            detail = (
+                f" Last solver error (at alpha={last_failure[0]:g}): "
+                f"{last_failure[1]}." if last_failure else ""
+            )
+            raise RuntimeError(
+                f"CoxPH fallback fits also failed at every automatically "
+                f"escalated penalty ({tried}). Data may be too degenerate for "
+                f"Cox PH.{detail} Pass an explicit alpha= to override the "
+                f"ladder, or force=True to keep an unpenalized fit when only "
+                f"warnings fired.{_cause_hint}"
+            )
+
+        # One wrapper warning, naming the penalty actually used. It is emitted
+        # after the ladder rather than before it because the winning alpha is
+        # not known until the ladder resolves.
+        skipped = ladder[: ladder.index(winner)]
+        escalated = (
+            f" (escalated past {', '.join(f'{a:g}' for a in skipped)})"
+            if skipped else ""
+        )
         if fit_failed:
             msg = (
-                f"CoxPH(alpha={self.alpha}) optimizer failed "
-                f"(NaN/infinite search direction). Re-fitting with "
-                f"alpha={_FALLBACK_ALPHA}"
+                f"CoxPH(alpha={self.alpha}) optimizer failed (NaN/infinite "
+                f"search direction or LAPACK solve failure). Re-fitting with "
+                f"alpha={winner:g}{escalated}"
             )
             if self.force:
                 msg += (
@@ -224,33 +361,59 @@ class CoxPHModel(BaseSurvivalModel):
         else:
             msg = (
                 f"CoxPH(alpha={self.alpha}) produced numerical "
-                f"instability. Re-fitting with alpha={_FALLBACK_ALPHA} "
+                f"instability. Re-fitting with alpha={winner:g}{escalated} "
                 f"for valid survival probabilities. Set force=True to "
                 f"keep the original fit (C-index still valid, but "
                 f"survival function predictions will be unreliable)."
             )
         warnings.warn(msg + _cause_hint, FitFailureWarning, stacklevel=2)
 
-        self.alpha_ = _FALLBACK_ALPHA
-        self.model_ = CoxPHSurvivalAnalysis(alpha=_FALLBACK_ALPHA)
-        try:
-            fb_failed, fb_warnings, _fb_convergence = self._fit_and_check(X, y)
-        except Exception as exc:
-            raise RuntimeError(
-                f"CoxPH fallback fit (alpha={_FALLBACK_ALPHA}) also "
-                f"failed: {exc}. Data may be too degenerate for Cox PH."
-            ) from exc
-        if fb_failed:
-            raise RuntimeError(
-                f"CoxPH fallback fit (alpha={_FALLBACK_ALPHA}) also "
-                f"failed (optimizer ValueError). Data may be too "
-                f"degenerate for Cox PH."
+        if self.alpha == 0 and winner > _FALLBACK_ALPHAS[0]:
+            # Past the first rung the penalty is strong enough to bias the
+            # coefficients, so say what that costs. hazard_ratio_valid also
+            # turns False here, which suppresses the hazard-ratio table and
+            # forest plot; this warning explains why they went missing.
+            # The reason is also stored on the model, because a warning at fit
+            # time does not reach someone reading the report later.
+            self.hr_suppressed_reason_ = (
+                f"Suppressed. The fit needed alpha={winner:g} to stay stable, "
+                f"and at that penalty the coefficients are shrunk enough that "
+                f"hazard ratios, confidence intervals, and p-values would be "
+                f"conditional on the penalty rather than unbiased "
+                f"multivariable estimates. The C-index and survival "
+                f"probabilities are unaffected."
             )
-        if fb_warnings:
             warnings.warn(
-                f"CoxPH fallback fit (alpha={_FALLBACK_ALPHA}) also "
+                f"CoxPH escalated to alpha={winner:g} to obtain a stable fit. "
+                f"At this penalty the coefficients are meaningfully shrunk "
+                f"toward zero, so hazard ratios, Wald confidence intervals, "
+                f"and p-values would be conditional on the penalty rather than "
+                f"unbiased multivariable estimates. They are suppressed for "
+                f"this model. The C-index and survival probabilities remain "
+                f"usable. For a regularized Cox model with proper inference, "
+                f"consider CoxNet.",
+                MethodologicalWarning,
+                stacklevel=2,
+            )
+
+        if winner_warned:
+            warnings.warn(
+                f"CoxPH fallback fit (alpha={winner:g}) also "
                 f"produced numerical instability warnings. Survival "
                 f"function predictions may still be unreliable.",
+                FitFailureWarning,
+                stacklevel=2,
+            )
+
+        if winner_convergence:
+            # Same condition the non-fallback path warns about above. Without
+            # this the ladder would be quieter about a non-converged fit than
+            # a plain one, and its coefficients would be published unflagged.
+            warnings.warn(
+                f"CoxPH fallback fit (alpha={winner:g}) did not converge "
+                f"within sksurv's default n_iter. Coefficients may be "
+                f"unreliable. Consider increasing n_iter (via sksurv's "
+                f"CoxPHSurvivalAnalysis) or passing a larger alpha.",
                 FitFailureWarning,
                 stacklevel=2,
             )
@@ -265,7 +428,10 @@ class CoxPHModel(BaseSurvivalModel):
         Returns
         -------
         fit_failed : bool
-            True if the optimizer raised ValueError (model not fitted).
+            True if the optimizer raised a numerical ``ValueError`` and the
+            model was not fitted: a NaN/infinite search direction, a LAPACK
+            illegal-value report, or a singular matrix. Caller/parameter
+            ``ValueError``s propagate instead.
         has_warnings : bool
             True if numerical-instability ``RuntimeWarning``s were emitted —
             either overflow messages or scipy ``LinAlgWarning``-style
@@ -283,8 +449,19 @@ class CoxPHModel(BaseSurvivalModel):
                 self.model_.fit(X, y)
         except ValueError as exc:
             reemit_non_overflow(caught)
-            msg = str(exc).lower()
-            if "nan" in msg or "infinite" in msg or "singular" in msg:
+            # A numerical failure of the optimizer, or of the scipy solve()
+            # inside it, routes into the escalating alpha fallback. Bad input
+            # and bad arguments are checked first and propagate unchanged: a
+            # NaN cell or a negative alpha is not fixed by regularization, and
+            # sklearn's own message says far more about it than we could. See
+            # the message census in _overflow.py.
+            message = str(exc)
+            if _CALLER_ERROR_RE.search(message):
+                raise
+            if _SOLVER_FAILURE_RE.search(message):
+                # Kept so the ladder can quote the real cause if every rung
+                # fails; the boolean return alone throws the text away.
+                self._last_solver_error_ = message
                 return True, False, False
             raise
 
@@ -308,7 +485,7 @@ class CoxPHModel(BaseSurvivalModel):
 
         The covariance is the inverse of the (possibly penalized) observed
         information matrix at the fitted coefficients.  When ``alpha_ > 0``
-        (user-specified or from the automatic fallback), the L2 penalty is
+        (user-specified or from the automatic fallback ladder), the L2 penalty is
         included in the Hessian, so the resulting CIs are conditional on the
         regularization strength.
 

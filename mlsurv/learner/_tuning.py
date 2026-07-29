@@ -914,9 +914,16 @@ class TuningMixin:
             # Custom instances skip automatic n_jobs propagation; warn once here
             # (covers both train(tune=True) and tune(instance) entry points).
             self._warn_custom_njobs_mismatch(custom_model, model_name)
-            return tuner
+        else:
+            tuner = get_tuner(model_name, **tuner_kwargs)
 
-        return get_tuner(model_name, **tuner_kwargs)
+        # Cross-phase FitFailureWarning dedup. The tuner emits its own trial
+        # warnings (BaseTuner._emit_trial_warnings, called from tune()), so it
+        # needs a direct reference to the learner's set. Without it, the
+        # tune-phase copy and the post-tune CV / final-fit copy of the same
+        # instability message both reach the user.
+        tuner._seen_warning_keys = self._state.fit_failure_warned
+        return tuner
 
     def _extract_tuned_params(self: SurvivalLearner, best_params, model_name):
         """

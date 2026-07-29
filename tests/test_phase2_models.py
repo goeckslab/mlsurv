@@ -534,12 +534,12 @@ class TestWeibullAFTCoefficients:
     ):
         """Real rank-deficient X (no mocking) makes scipy emit the actual
         LinAlgWarning inside sksurv's solve(); the wrapper consumes it and
-        lands at _FALLBACK_ALPHA. Guards against scipy/sksurv message-text
-        drift that mock-based tests would silently miss."""
+        lands on a rung of the fallback ladder. Guards against scipy/sksurv
+        message-text drift that mock-based tests would silently miss."""
         import warnings as _warnings
         from mlsurv.models import CoxPHModel
         from mlsurv._warnings import FitFailureWarning
-        from mlsurv.models.coxph import _FALLBACK_ALPHA
+        from mlsurv.models.coxph import _FALLBACK_ALPHAS
 
         X_train, _, y_train, _ = train_test_data
         # Force exact rank deficiency: append a column that is the sum of
@@ -556,7 +556,9 @@ class TestWeibullAFTCoefficients:
             model.fit(X_rd, y_train)
 
         assert model.overflow_detected_ is True
-        assert model.alpha_ == _FALLBACK_ALPHA
+        # Which rung wins depends on the local BLAS, so assert membership
+        # rather than pinning the exact penalty.
+        assert model.alpha_ in _FALLBACK_ALPHAS
         # No raw ill-conditioned warning should reach the caller.
         leaked = [w for w in caught
                   if "ill-conditioned" in str(w.message)
@@ -568,18 +570,20 @@ class TestWeibullAFTCoefficients:
         assert len(fit_failures) >= 1
 
     def test_double_failure_raises_runtime_error(self, train_test_data):
-        """When fallback fit also fails, RuntimeError is raised."""
+        """When every fallback rung also fails, RuntimeError is raised."""
         from unittest.mock import patch
         from mlsurv.models import CoxPHModel
+        from mlsurv.models.coxph import _FALLBACK_ALPHAS
 
         X_train, _, y_train, _ = train_test_data
         model = CoxPHModel(alpha=0)
 
-        # First call: instability detected. Second call (fallback): also fails.
+        # First call: instability detected. Then one call per ladder rung,
+        # all reporting failure, so the ladder is exhausted.
         with patch.object(
             CoxPHModel,
             "_fit_and_check",
-            side_effect=[(True, False, False), ValueError("degenerate data")],
+            side_effect=[(True, False, False)] * (1 + len(_FALLBACK_ALPHAS)),
         ):
             with pytest.raises(RuntimeError, match="also failed"):
                 model.fit(X_train, y_train)
