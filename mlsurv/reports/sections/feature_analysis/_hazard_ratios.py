@@ -6,7 +6,11 @@ import pandas as pd
 
 from mlsurv.reports.sections.base import FigureInfo
 
-from ._coefficients import find_hr_valid_model
+from ._coefficients import (
+    find_covariance_gap_reason,
+    find_hr_suppression_reason,
+    find_hr_valid_model,
+)
 from ._helpers import (
     CHART_EXCEPTIONS, _missing_data_note, _unplottable_hr_note,
 )
@@ -29,8 +33,13 @@ def generate_hazard_ratio_analysis(
     cox_model = find_hr_valid_model(section)
     has_univar = univar_cox is not None and not univar_cox.empty
     has_multivar = cox_model is not None
+    # Set only when a model was trained and its hazard ratios were deliberately
+    # withheld. It is rendered here, where the forest plot would have been:
+    # the same explanation in Model Development is no help to someone looking
+    # at the gap in this section.
+    suppressed_reason = None if has_multivar else find_hr_suppression_reason(section)
 
-    if not has_univar and not has_multivar:
+    if not has_univar and not has_multivar and not suppressed_reason:
         return {'markdown': '', 'figures': [], 'figure_info': []}
 
     md_lines.append("### Hazard Ratios")
@@ -47,6 +56,11 @@ def generate_hazard_ratio_analysis(
 
     if has_multivar:
         _render_multivariate_hr(section, md_lines, figures, figure_info)
+    elif suppressed_reason:
+        md_lines.append("#### Multivariate Hazard Ratios")
+        md_lines.append("")
+        md_lines.append(f"*Not reported for this model. {suppressed_reason}*")
+        md_lines.append("")
 
     if has_univar and has_multivar:
         _render_hr_comparison(section, md_lines, figures, figure_info)
@@ -133,16 +147,33 @@ def _render_multivariate_hr(section, md_lines, figures, figure_info):
             **section._group_plot_kwargs(),
         )
 
+        # Only promise intervals the plot actually drew. When the covariance
+        # matrix could not be built, compute_hazard_ratios sets ci_available
+        # False and the forest plot hides its whiskers, so an unconditional
+        # "with 95% confidence intervals" would describe a chart that has none.
+        # None (no such column) is a third state: say nothing either way, the
+        # same way the convergence line treats an unrecorded outcome.
+        has_ci = (bool(hr_data["ci_available"].any())
+                  if "ci_available" in hr_data.columns else None)
+        interval_clause = " with 95% confidence intervals" if has_ci else ""
         md_lines.append("#### Multivariate Hazard Ratios")
         md_lines.append("")
         md_lines.append(
-            "Adjusted hazard ratios from the multivariate Cox model with 95% "
-            "confidence intervals. Each HR represents the independent effect of "
+            "Adjusted hazard ratios from the multivariate Cox model"
+            f"{interval_clause}. Each HR represents the independent effect of "
             "a feature after adjustment for all other features in the model. "
             f"Shows up to {section.n_features} features "
             "ranked by absolute deviation from HR = 1."
         )
         md_lines.append("")
+        # `is False`, not `not has_ci`: None means the frame did not say, so
+        # asserting the intervals are missing would be as much of a guess as
+        # asserting they are there.
+        if has_ci is False:
+            reason = (find_covariance_gap_reason(section)
+                      or "No covariance matrix was available for this fit.")
+            md_lines.append(f"*Confidence intervals are not shown. {reason}*")
+            md_lines.append("")
 
         figures.append(('hazard_ratios.png', fig))
         md_lines.append("![Hazard Ratios](images/hazard_ratios.png)")

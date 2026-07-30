@@ -19,7 +19,9 @@ from unittest.mock import patch
 import numpy as np
 import pytest
 
-from mlsurv._warnings import FitFailureWarning, MethodologicalWarning
+from mlsurv._warnings import (
+    FitFailureWarning, MethodologicalWarning, SuggestionWarning,
+)
 from mlsurv.models import CoxPHModel
 from mlsurv.models._overflow import _CALLER_ERROR_RE, _SOLVER_FAILURE_RE
 from mlsurv.models.coxph import _FALLBACK_ALPHAS, _fallback_ladder
@@ -661,3 +663,70 @@ def test_real_lapack_valueerror_from_the_solver_lands_on_a_rung(
     assert model.overflow_detected_ is True
     assert np.all(np.isfinite(model.predict(X_train)))
     assert "LAPACK solve failure" in str(_fit_failures(caught)[0].message)
+
+
+# ---------------------------------------------------------------------------
+# 6. a failed covariance says why, instead of silently costing every CI
+# ---------------------------------------------------------------------------
+
+def _fit_with_singular_hessian(train_test_data):
+    """Fit for real, but make the covariance inversion raise.
+
+    scipy's inv does not raise on the degenerate designs a caller can actually
+    build (duplicate columns, p>n, constant columns all return garbage rather
+    than failing), so the seam has to be patched to reach this branch at all.
+    """
+    X_train, _, y_train, _ = train_test_data
+    model = CoxPHModel(alpha=0)
+    singular = np.linalg.LinAlgError("Matrix is singular.")
+
+    with patch("mlsurv.models.coxph._inv", side_effect=singular), \
+            warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model.fit(X_train, y_train)
+    return model, caught
+
+
+def test_no_reason_recorded_when_the_covariance_works(train_test_data):
+    """The common case: intervals exist, so there is nothing to explain."""
+    X_train, _, y_train, _ = train_test_data
+    model = CoxPHModel(alpha=0).fit(X_train, y_train)
+
+    assert hasattr(model.model_, "covariance_matrix_")
+    assert model.covariance_unavailable_reason_ is None
+
+
+def test_singular_hessian_records_why_the_intervals_are_gone(train_test_data):
+    """A fit-time warning does not reach whoever reads the report later.
+
+    The hazard ratios survive a failed inversion; only the intervals around
+    them are lost. Without this, that costs every CI and p-value on the report
+    with nothing on the page saying so.
+    """
+    model, caught = _fit_with_singular_hessian(train_test_data)
+
+    assert model.is_fitted_ is True
+    assert not hasattr(model.model_, "covariance_matrix_")
+    assert "is singular" in model.covariance_unavailable_reason_
+    assert "Matrix is singular." in model.covariance_unavailable_reason_
+    # The point estimates are unaffected, and the reason must say so.
+    assert model.hazard_ratio_valid is True
+    assert "still valid point estimates" in model.covariance_unavailable_reason_
+    assert any(issubclass(w.category, SuggestionWarning)
+               and "Could not compute covariance matrix" in str(w.message)
+               for w in caught)
+
+
+def test_covariance_reason_is_cleared_by_a_later_fit(train_test_data):
+    """The reason describes one fit, so it must not outlive it."""
+    X_train, _, y_train, _ = train_test_data
+    model, _ = _fit_with_singular_hessian(train_test_data)
+    assert model.covariance_unavailable_reason_ is not None
+
+    model.fit(X_train, y_train)
+
+    assert model.covariance_unavailable_reason_ is None
+
+
+def test_covariance_reason_is_none_before_a_fit():
+    assert CoxPHModel().covariance_unavailable_reason_ is None

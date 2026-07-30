@@ -124,6 +124,16 @@ class CoxPHModel(BaseSurvivalModel):
         outcome is not known (before a fit, after one that raised, or on a
         model saved before this was recorded), which is not the same as "did
         not converge".
+    covariance_unavailable_reason_ : str or None
+        Why the covariance matrix could not be computed, or ``None`` when it
+        was. Set only by ``_attach_covariance``'s failure branches and cleared
+        at the top of every ``fit()``. Like ``converged_``, ``None`` means "no
+        failure was recorded", which is not quite the same as "the intervals
+        are available": a ``fit()`` that raises from outside those branches, or
+        a model saved before this was recorded, also reads ``None``. Check
+        ``model_.covariance_matrix_`` if you need certainty. Without this, a
+        singular Hessian costs every confidence interval and p-value on the
+        report with nothing on the page saying so.
     hr_suppressed_reason_ : str or None
         Why ``exp(coef)`` is not reported as a multivariable hazard ratio, or
         ``None`` when it is. Computed on read from ``(alpha, alpha_)``, so it
@@ -244,10 +254,13 @@ class CoxPHModel(BaseSurvivalModel):
         self.alpha = alpha
         self.force = force
         self.model_ = None
-        # None means "no fit has recorded an outcome yet", which the report
-        # renders as unknown rather than as a failure. Matches the same
-        # attribute on the fssvm, deepsurv, and deephit wrappers.
+        # converged_: None means "no fit has recorded an outcome yet", which
+        # the report renders as unknown rather than as a failure. Matches the
+        # same attribute on the fssvm, deepsurv, and deephit wrappers.
         self.converged_ = None
+        # CoxPH alone computes a covariance matrix, so this attribute is not
+        # shared with those wrappers. None means no failure was recorded.
+        self.covariance_unavailable_reason_ = None
 
     def fit(self, X, y: SurvivalArray):
         """
@@ -294,10 +307,13 @@ class CoxPHModel(BaseSurvivalModel):
         self.overflow_detected_ = False
         self._last_solver_error_ = None
         # Cleared so a re-fit that raises after this point does not leave the
-        # previous fit's outcome behind. _finalize_fit sets both on whichever
-        # path succeeds.
+        # previous fit's outcome behind. _finalize_fit sets converged_ and
+        # unstable_fit_kept_ on whichever path succeeds; _attach_covariance
+        # sets the reason only when it fails, so clearing it here is what makes
+        # "no reason" mean "the covariance was computed".
         self.converged_ = None
         self.unstable_fit_kept_ = False
+        self.covariance_unavailable_reason_ = None
 
         if self.alpha > 0:
             # A user-specified ridge penalty (e.g. from tuning an explicit
@@ -637,9 +653,17 @@ class CoxPHModel(BaseSurvivalModel):
         the full information matrix.
 
         On failure (e.g. singular Hessian), the attribute is simply not set
-        and ``compute_hazard_ratios`` falls back to point estimates.
+        and ``compute_hazard_ratios`` falls back to point estimates. The
+        reason is recorded in ``covariance_unavailable_reason_`` so the report
+        can say why the intervals are missing, long after this warning has
+        scrolled past.
         """
         if not hasattr(self.model_, "coef_"):
+            self.covariance_unavailable_reason_ = (
+                "The model has no fitted coefficients, so the observed "
+                "information matrix could not be built. Confidence intervals "
+                "and p-values are unavailable."
+            )
             warnings.warn(
                 "Could not compute covariance matrix for CoxPH: model has "
                 "no fitted coefficients (coef_). Confidence intervals will "
@@ -672,6 +696,24 @@ class CoxPHModel(BaseSurvivalModel):
                 )
             reemit_non_overflow(caught)
         except (np.linalg.LinAlgError, ValueError) as exc:
+            # Only a singular matrix earns "the point estimates are fine".
+            # _inv is scipy's, with check_finite=True, so a Hessian holding
+            # inf/NaN arrives here as a ValueError: that means the fit itself
+            # blew up numerically, which is precisely when the coefficients
+            # should not be vouched for.
+            if isinstance(exc, np.linalg.LinAlgError):
+                self.covariance_unavailable_reason_ = (
+                    f"The observed information matrix is singular ({exc}), so "
+                    f"confidence intervals and p-values are unavailable. The "
+                    f"hazard ratios themselves are still valid point estimates."
+                )
+            else:
+                self.covariance_unavailable_reason_ = (
+                    f"The observed information matrix could not be built or "
+                    f"inverted ({exc}), so confidence intervals and p-values "
+                    f"are unavailable. Treat the coefficients with caution: "
+                    f"this usually means the fit was numerically unstable."
+                )
             warnings.warn(
                 f"Could not compute covariance matrix for CoxPH: {exc}. "
                 f"Confidence intervals will not be available in forest plots.",

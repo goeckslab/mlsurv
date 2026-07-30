@@ -2620,8 +2620,14 @@ class TestModelResultCoefficients:
         assert len(df) == 0
 
     def test_singular_hessian_no_crash(self, coef_learner):
-        """Missing covariance: coefficient + HR present, CI/p NaN, warns."""
-        from mlsurv._warnings import InternalWarning
+        """Missing covariance: coefficient + HR present, CI/p NaN, warns.
+
+        The tier is ``SuggestionWarning``, not ``InternalWarning``: the default
+        filters ignore the latter, so losing every CI and p-value on the
+        coefficient table used to reach the user as bare NaN columns. See
+        ``tests/test_missing_ci_is_explained.py`` for the default-filter guard.
+        """
+        from mlsurv._warnings import SuggestionWarning
         from mlsurv.utils import unwrap_pipeline
 
         inner = unwrap_pipeline(coef_learner.models["coxph"].model)
@@ -2629,7 +2635,7 @@ class TestModelResultCoefficients:
         # designs may still invert via the ridge fallback).
         del inner.model_.covariance_matrix_
 
-        with pytest.warns(InternalWarning, match="[Cc]ovariance"):
+        with pytest.warns(SuggestionWarning, match="[Cc]ovariance"):
             df = coef_learner.models["coxph"].coefficients
         assert df["coefficient"].notna().all()
         assert df["hazard_ratio"].notna().all()

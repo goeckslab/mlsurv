@@ -264,10 +264,16 @@ def prepare_univariate_hr_df(state):
         )
     ci_missing = [c for c in ('ci_lower', 'ci_upper') if c not in df.columns]
     if ci_missing:
+        # SuggestionWarning for the same reason as the multivariate path in
+        # viz/_features_hazard_ratios.py: ci_lower == ci_upper == hr costs the
+        # plot every whisker and its CI axis label, and InternalWarning is
+        # ignored by the default filters, so it happened silently. The report
+        # skips this block outright when the columns are missing, but a direct
+        # plot_hazard_ratios(kind='univariate') call has no such guard.
         warnings.warn(
             "Univariate Cox results do not include confidence "
             "intervals. ci_lower and ci_upper are set equal to hr.",
-            InternalWarning,
+            SuggestionWarning,
             # prepare_univariate_hr_df -> impl -> wrapper -> user
             stacklevel=4,
         )

@@ -12,8 +12,9 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 
+from mlsurv._shared import covariance_reason
 from mlsurv._warnings import (
-    ClampWarning, InternalWarning, MethodologicalWarning,
+    ClampWarning, InternalWarning, MethodologicalWarning, SuggestionWarning,
 )
 from mlsurv.viz._palettes import (
     FeatureGroupsType,
@@ -165,20 +166,30 @@ def _compute_error_bounds(df, model, coef_values, ci_level, error_bars):
             df["ci_available"] = True
             return
         except (ValueError, IndexError, TypeError, np.linalg.LinAlgError) as e:
+            # SuggestionWarning, not InternalWarning: the default filters
+            # ignore InternalWarning, so the forest plot would lose every
+            # whisker with nothing said about it.
             warnings.warn(
                 f"Could not compute error bounds from covariance matrix "
                 f"for {model.__class__.__name__}: {e}. Showing point estimates only.",
-                InternalWarning,
+                SuggestionWarning,
                 stacklevel=3,
             )
     else:
-        warnings.warn(
-            f"{model.__class__.__name__} does not provide a covariance matrix; "
-            f"confidence intervals are unavailable. "
-            f"ci_lower and ci_upper are set equal to hr.",
-            InternalWarning,
-            stacklevel=3,
+        # Only a hazard-ratio-valid model gets this far, and today that means
+        # CoxPH, which does normally provide a covariance matrix. So the old
+        # "does not provide a covariance matrix" was a claim about the model
+        # type when the truth is about this one fit. Say what is observable
+        # instead, and add the model's own reason when it recorded one.
+        reason = covariance_reason(model)
+        message = (
+            f"No covariance matrix is available for "
+            f"{model.__class__.__name__}, so confidence intervals cannot be "
+            f"computed. In the returned frame, ci_lower and ci_upper equal hr."
         )
+        if reason:
+            message += f" {reason}"
+        warnings.warn(message, SuggestionWarning, stacklevel=3)
     df["ci_lower"] = df["hr"]
     df["ci_upper"] = df["hr"]
     df["ci_available"] = False

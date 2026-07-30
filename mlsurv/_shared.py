@@ -583,3 +583,24 @@ def _warn_unused_dict_keys(param_dict, param_name, used_keys):
             f"ignored: {sorted(unused)}. Models used: {sorted(used_keys)}",
             SuggestionWarning,
         )
+
+
+# ---------------------------------------------------------------------------
+# covariance_reason — read a model's recorded "why no CIs" string safely
+# ---------------------------------------------------------------------------
+
+def covariance_reason(model):
+    """Return ``model.covariance_unavailable_reason_`` if it is real text.
+
+    Callers in ``evaluation/``, ``viz/``, ``results/``, and ``reports/``
+    interpolate this into something a user reads, so they all need the same two
+    guards. Only CoxPH records a reason, and a model pickled before it existed
+    has no such attribute, hence the ``getattr`` default. The ``isinstance``
+    matters too: a duck-typed stand-in (a ``MagicMock``, say) answers every
+    ``getattr`` truthily, which would splice a repr into the sentence.
+
+    None means there is nothing usable to say, so callers can fall back to their
+    own generic wording with ``or``.
+    """
+    reason = getattr(model, "covariance_unavailable_reason_", None)
+    return reason if isinstance(reason, str) and reason else None

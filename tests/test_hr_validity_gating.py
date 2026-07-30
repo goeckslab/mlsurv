@@ -182,3 +182,102 @@ class TestReportHRGating:
 
         assert "Multivariate Hazard Ratios" in out["markdown"]
         assert out["figures"]
+
+
+@pytest.mark.integration
+class TestSuppressionIsExplainedWhereTheGapIs:
+    """The reason belongs in the section the reader is looking at.
+
+    Model Development already carried it, but a reader who notices the missing
+    forest plot is in Feature Analysis and has no pointer to the other section.
+    """
+
+    def _render(self, learner, univar_cox=None):
+        from mlsurv.reports.sections.feature_analysis import FeatureAnalysisSection
+        from mlsurv.reports.sections.feature_analysis._hazard_ratios import (
+            generate_hazard_ratio_analysis,
+        )
+
+        section = FeatureAnalysisSection(learner)
+        return generate_hazard_ratio_analysis(section, univar_cox=univar_cox)
+
+    def _copy_without_covariance(self, learner):
+        """Return ``(learner copy, inner CoxPH)`` with the covariance removed.
+
+        Deleting the attribute beats trying to provoke a singular Hessian:
+        scipy's inv succeeds on every degenerate design a caller can build,
+        because the alpha fallback regularizes the fit first. The copy keeps
+        the module-scoped fixture intact for the other tests.
+        """
+        import copy
+
+        from mlsurv.utils import unwrap_pipeline
+
+        learner = copy.deepcopy(learner)
+        inner = unwrap_pipeline(learner.models["coxph"].model)
+        del inner.model_.covariance_matrix_
+        return learner, inner
+
+    def test_penalized_coxph_explains_the_missing_forest(
+        self, penalized_coxph_learner,
+    ):
+        """The gap used to be unexplained here even after the reason existed."""
+        out = self._render(penalized_coxph_learner)
+
+        assert "Not reported for this model" in out["markdown"]
+        assert "alpha=" in out["markdown"]
+        # Explaining the gap must not resurrect the plot it explains.
+        assert out["figures"] == []
+
+    def test_coxnet_only_still_returns_nothing(self, coxnet_only_learner):
+        """CoxNet records no reason, so the clean skip is unchanged.
+
+        Guards the boundary of the new branch: it must fire for a model that
+        deliberately withheld its hazard ratios, not for one that never had
+        any to withhold.
+        """
+        out = self._render(coxnet_only_learner)
+
+        assert out["markdown"] == ""
+        assert out["figures"] == []
+
+    def test_healthy_coxph_still_promises_its_intervals(self, coxph_learner):
+        """The common case: the CI clause is conditional, not removed."""
+        out = self._render(coxph_learner)
+
+        assert "with 95% confidence intervals" in out["markdown"]
+        assert "Confidence intervals are not shown" not in out["markdown"]
+        assert "Not reported for this model" not in out["markdown"]
+
+    def test_missing_covariance_drops_the_interval_promise(self, coxph_learner):
+        """The missing-interval branch, asserted positively.
+
+        The healthy case is covered above; without this, nothing pins that the
+        prose actually stops promising intervals when the plot has none.
+        """
+        learner, _ = self._copy_without_covariance(coxph_learner)
+
+        out = self._render(learner)
+
+        assert "with 95% confidence intervals" not in out["markdown"]
+        assert "Confidence intervals are not shown" in out["markdown"]
+        # The forest plot itself still belongs on the page: the hazard ratios
+        # are unaffected, only the whiskers are gone.
+        assert "Multivariate Hazard Ratios" in out["markdown"]
+        assert out["figures"]
+
+    def test_interval_note_falls_back_when_no_reason_was_recorded(
+        self, coxph_learner,
+    ):
+        """A model that never recorded a reason still gets an explanation.
+
+        Deleting covariance_matrix_ by hand leaves
+        covariance_unavailable_reason_ at None, which is also what an older
+        pickle looks like. The note must not render as an empty sentence.
+        """
+        learner, inner = self._copy_without_covariance(coxph_learner)
+        assert inner.covariance_unavailable_reason_ is None
+
+        out = self._render(learner)
+
+        assert "No covariance matrix was available for this fit." in out["markdown"]

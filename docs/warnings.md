@@ -44,6 +44,7 @@ model.alpha_                  # the penalty it settled on
 model.unstable_fit_kept_      # True if nothing resolved that instability
 model.converged_              # False if the optimizer ran out of iterations
 model.hr_suppressed_reason_   # why hazard ratios are missing, or None
+model.covariance_unavailable_reason_   # why their CIs are missing, or None
 ```
 
 `overflow_detected_` says instability was *seen*; `unstable_fit_kept_` says
@@ -64,6 +65,17 @@ escalated to *past the first rung*. An escalation to the first rung (0.01)
 leaves the table in place, so the reason stays `None` there. The report prints
 whatever it returns, so you do not have to keep the fit-time warning to know
 why the section is missing.
+
+`covariance_unavailable_reason_` is the separate question of whether the
+*intervals around* those hazard ratios could be computed. The two are
+independent: the hazard ratios can be perfectly reportable while the observed
+information matrix will not invert, which costs every confidence interval and
+Wald p-value but leaves the point estimates intact. When it is set,
+`coefficients` returns NaN in `hr_lower_95` / `hr_upper_95` / `p_value`,
+`plot_hazard_ratios` draws no whiskers, `format_hazard_ratios` puts `'N/A'` in
+the CI column, and each of those says so with a `SuggestionWarning` rather than
+leaving you to notice. It is rare in practice: on a rank-deficient design the
+alpha fallback usually regularizes the fit enough that the inversion succeeds.
 
 `ExportSplitWarning` is a `SuggestionWarning` that fires on every export whose
 output is not all where you asked for it — result tables too large for a

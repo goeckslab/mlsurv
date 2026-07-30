@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 from typing import TYPE_CHECKING
 
+from mlsurv._shared import covariance_reason
 from mlsurv.reports.sections.base import ALL_EXCEPTIONS
 from mlsurv.utils import unwrap_pipeline, propagate_feature_names
 from mlsurv.viz._palettes import get_model_display_name
@@ -197,12 +198,24 @@ class _TrainedDetailsSubsection:
                 "recorded for this model."
             )
         md_lines.append(line)
-        # Say why the hazard-ratio table and forest plot are missing. The
-        # warning that explains it fires at fit time, long before the report is
-        # written, so without this the section is just an unexplained gap.
-        if getattr(model, 'hr_suppressed_reason_', None):
+        # Say why the hazard-ratio table and forest plot are missing, or — a
+        # separate gap with a separate cause — why the intervals around
+        # otherwise valid hazard ratios are. Either warning fires at fit time,
+        # long before the report is written, so without this the section is
+        # just an unexplained gap.
+        #
+        # elif, not a second if: when the hazard ratios are suppressed there
+        # are no intervals left on the page to explain, and the covariance
+        # reason vouches for the point estimates, which would contradict the
+        # line above it.
+        hr_reason = getattr(model, 'hr_suppressed_reason_', None)
+        cov_reason = covariance_reason(model)
+        if hr_reason:
             md_lines.append("")
-            md_lines.append(f"**Hazard ratios:** {model.hr_suppressed_reason_}")
+            md_lines.append(f"**Hazard ratios:** {hr_reason}")
+        elif cov_reason:
+            md_lines.append("")
+            md_lines.append(f"**Confidence intervals:** {cov_reason}")
         md_lines.append("")
 
     def _add_coxnet_details(self, md_lines, model):

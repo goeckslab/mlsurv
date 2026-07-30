@@ -19,6 +19,7 @@ import numpy as np
 import pandas as pd
 from scipy.stats import norm
 
+from .._shared import covariance_reason
 from .._warnings import InternalWarning, SuggestionWarning
 from ..utils import propagate_feature_names, unwrap_pipeline
 from .importance import _align_coefficients, _get_selected_features
@@ -51,7 +52,7 @@ def compute_wald_inference(actual_model, coef_values, ci_level=0.95):
         Unwrapped mlsurv model wrapper. Inference requires
         ``actual_model.model_.covariance_matrix_``; when absent (e.g.
         singular Hessian on a rank-deficient design) NaN arrays are
-        returned with an ``InternalWarning`` instead of crashing.
+        returned with a ``SuggestionWarning`` instead of crashing.
     coef_values : array-like
         Coefficients in the model's (post-selection) feature order, which
         MUST match the covariance matrix diagonal order. This invariant
@@ -77,11 +78,19 @@ def compute_wald_inference(actual_model, coef_values, ci_level=0.95):
     cov = getattr(getattr(actual_model, 'model_', None),
                   'covariance_matrix_', None)
     if cov is None:
+        # SuggestionWarning, not InternalWarning: the default filters ignore
+        # InternalWarning, and losing every confidence interval and p-value on
+        # the coefficient table is not an internal detail. CoxPH's recorded
+        # reason is already a complete explanation, so it replaces the generic
+        # tail rather than being appended to it.
+        detail = covariance_reason(actual_model) or (
+            "Confidence intervals and p-values will be NaN; hazard ratios "
+            "remain available."
+        )
         warnings.warn(
             f"Covariance matrix unavailable for "
-            f"{type(actual_model).__name__}; confidence intervals and "
-            f"p-values will be NaN (hazard ratios remain available).",
-            InternalWarning,
+            f"{type(actual_model).__name__}. {detail}",
+            SuggestionWarning,
             stacklevel=2,
         )
         return nan_result
@@ -99,7 +108,7 @@ def compute_wald_inference(actual_model, coef_values, ci_level=0.95):
             f"Could not compute Wald inference for "
             f"{type(actual_model).__name__}: {exc}. Confidence intervals "
             f"and p-values will be NaN.",
-            InternalWarning,
+            SuggestionWarning,
             stacklevel=2,
         )
         return nan_result

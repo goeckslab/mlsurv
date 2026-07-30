@@ -217,6 +217,30 @@ def format_bootstrap_summary(
     return result
 
 
+def _warn_no_ci(model, cause: str) -> None:
+    """Say why the ``95% CI`` column is ``'N/A'`` instead of returning it bare.
+
+    ``'N/A'`` is honest but mute: a caller reading the table has no way to tell
+    a model that cannot have intervals from a Cox fit whose Hessian turned out
+    to be singular. CoxPH's recorded reason is a complete sentence and already
+    says the hazard ratios are unaffected, so it replaces the whole tail rather
+    than *cause* being spliced into it. ``covariance_reason`` reads it by
+    attribute rather than by model type, so ``results/`` keeps no dependency on
+    ``models/``, the same way the ``hazard_ratio_valid`` gate below does.
+
+    *cause* follows a full stop, so callers pass it capitalized.
+    """
+    from mlsurv._shared import covariance_reason
+    from mlsurv._warnings import SuggestionWarning
+
+    detail = covariance_reason(model) or f"{cause} Hazard ratios are unaffected."
+    warnings.warn(
+        f"{model.__class__.__name__}: the 95% CI column is 'N/A'. {detail}",
+        SuggestionWarning,
+        stacklevel=3,
+    )
+
+
 def format_hazard_ratios(
     model,
     feature_names: Optional[List[str]] = None,
@@ -241,7 +265,10 @@ def format_hazard_ratios(
     Returns
     -------
     DataFrame
-        Table with Feature, HR, 95% CI columns.
+        Table with Feature, HR, 95% CI columns. The ``95% CI`` cells are the
+        string ``'N/A'`` when no usable covariance matrix is available (e.g. a
+        singular Hessian on a rank-deficient design); a ``SuggestionWarning``
+        says why. ``HR`` is unaffected.
 
     Raises
     ------
@@ -290,9 +317,11 @@ def format_hazard_ratios(
                 lambda row: f"[{row['CI Lower']:.{precision}f}, {row['CI Upper']:.{precision}f}]",
                 axis=1
             )
-        except (ValueError, IndexError, TypeError, np.linalg.LinAlgError):
+        except (ValueError, IndexError, TypeError, np.linalg.LinAlgError) as exc:
+            _warn_no_ci(model, f"The covariance matrix could not be used ({exc}).")
             df['95% CI'] = 'N/A'
     else:
+        _warn_no_ci(model, "No covariance matrix was attached to the fit.")
         df['95% CI'] = 'N/A'
 
     # Sort by absolute coefficient

@@ -18,6 +18,7 @@ from typing import Any, Dict, Optional
 import numpy as np
 import pandas as pd
 
+from mlsurv._shared import covariance_reason
 from mlsurv.utils import unwrap_pipeline
 from mlsurv.reports.sections.base import ALL_EXCEPTIONS
 
@@ -58,6 +59,34 @@ def find_hr_valid_model(section) -> Optional[Any]:
         if model is not None and getattr(model, "hazard_ratio_valid", False):
             return model
     return None
+
+
+def find_hr_suppression_reason(section) -> Optional[str]:
+    """Why the multivariate hazard-ratio block was withheld, or None.
+
+    ``find_hr_valid_model`` returns None both when no coefficient model was
+    trained and when one was trained but its ``exp(coef)`` is not a hazard
+    ratio. Only the second case has something to explain, and only the model
+    knows the reason, so read it back off the model here rather than
+    reconstructing it in the section.
+    """
+    for name in _COEF_MODEL_NAMES:
+        model = unwrap_coefficient_model(section, name)
+        if model is None:
+            continue
+        reason = getattr(model, "hr_suppressed_reason_", None)
+        if reason:
+            return reason
+    return None
+
+
+def find_covariance_gap_reason(section) -> Optional[str]:
+    """Why confidence intervals are missing from an otherwise valid HR model.
+
+    ``covariance_reason`` already answers None for a None model, so the "no
+    HR-valid model was trained" case needs no separate branch.
+    """
+    return covariance_reason(find_hr_valid_model(section))
 
 
 def get_all_coefficient_models(section) -> Dict[str, Any]:

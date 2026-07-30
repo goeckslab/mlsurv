@@ -147,13 +147,15 @@ class _StubCoxPH:
     """
 
     def __init__(self, converged=True, overflow=False, alpha_=0, alpha=0,
-                 unstable_kept=False, hr_suppressed_reason_=None):
+                 unstable_kept=False, hr_suppressed_reason_=None,
+                 covariance_unavailable_reason_=None):
         self.converged_ = converged
         self.overflow_detected_ = overflow
         self.alpha_ = alpha_
         self.alpha = alpha
         self.unstable_fit_kept_ = unstable_kept
         self.hr_suppressed_reason_ = hr_suppressed_reason_
+        self.covariance_unavailable_reason_ = covariance_unavailable_reason_
 
 
 def _render_coxph_details(model):
@@ -293,6 +295,36 @@ class TestCoxPHTrainedDetails:
 
     def test_no_suppression_line_when_no_reason_was_recorded(self):
         assert "Hazard ratios" not in _render_coxph_details(_StubCoxPH())
+
+    def test_missing_confidence_intervals_are_explained(self):
+        """A separate gap from the hazard ratios, with a separate cause."""
+        rendered = _render_coxph_details(_StubCoxPH(
+            covariance_unavailable_reason_="The matrix would not invert."
+        ))
+
+        assert "**Confidence intervals:** The matrix would not invert." in rendered
+
+    def test_no_confidence_interval_line_when_they_exist(self):
+        assert "Confidence intervals" not in _render_coxph_details(_StubCoxPH())
+
+    def test_suppressed_hazard_ratios_swallow_the_interval_note(self):
+        """No hazard ratios on the page means no intervals to explain.
+
+        The recorded covariance reason vouches for the point estimates, so
+        printing it under a line saying those estimates are withheld would put
+        two contradictory sentences one after the other.
+        """
+        rendered = _render_coxph_details(_StubCoxPH(
+            hr_suppressed_reason_="Suppressed. You passed alpha=0.1.",
+            covariance_unavailable_reason_=(
+                "The matrix is singular. The hazard ratios themselves are "
+                "still valid point estimates."
+            ),
+        ))
+
+        assert "**Hazard ratios:** Suppressed." in rendered
+        assert "**Confidence intervals:**" not in rendered
+        assert "still valid point estimates" not in rendered
 
     def test_real_fitted_model_renders_its_recorded_state(self, train_test_data):
         """Bind the stub tests to the real class.
