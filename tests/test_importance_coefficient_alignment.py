@@ -26,6 +26,7 @@ from mlsurv._warnings import MetricFailureWarning
 from mlsurv.evaluation import importance as imp_mod
 from mlsurv.models.coxph import CoxPHModel
 from mlsurv.preprocessing.selection import TopKCoxSelector
+from mlsurv.utils import unwrap_pipeline
 
 
 def _fitted_pipeline(X, y):
@@ -395,6 +396,71 @@ class TestCoefficientColumnMatchesTheModel:
         for feature in learner.X_test.columns:
             if feature not in selected:
                 assert np.isnan(reported[feature])
+
+
+class TestBothSurfacesAgree:
+    """Lock the agreement between the two coefficient surfaces.
+
+    ``EvaluationResult.importance`` and ``ModelResult.coefficients`` each
+    decide which feature label keys a coefficient, and they now do it with
+    one shared resolver. This is a forward-looking invariant lock, not a
+    regression guard: it passes on the code from before the resolver was
+    shared, because the feature names in ``small_data`` sort into the same
+    order the selector emits, so the reorder that used to break
+    ``weibull_aft`` does not arise here. The deterministic guard for that
+    rule is ``test_model_order_wins_over_selector_order`` in
+    ``test_containers.py`` (and its twin in ``test_phase3_evaluation.py``),
+    which uses a stub rather than depending on how lifelines happens to sort
+    a particular fixture.
+
+    What this class does pin, and nothing else does, is that the two
+    surfaces cover the same feature space at all: their rows come from
+    different sources (the test-set columns against the pipeline's
+    pre-selection names).
+
+    ``fssvm`` and ``weibull_aft`` carry the two odd index shapes, an integer
+    fallback and a flattened lifelines MultiIndex, so they are the pair
+    worth paying real training time for. ``coxph`` and ``coxnet`` take the
+    plain by-name path already covered above and by the stub tests.
+    """
+
+    @pytest.mark.parametrize("model_name", ["fssvm", "weibull_aft"])
+    def test_importance_and_result_coefficients_agree(
+            self, small_data, model_name):
+        X, y = small_data
+        learner = SurvivalLearner(X, y)
+        learner.setup(feature_selector=TopKCoxSelector(k=3), random_state=42)
+        learner.train(model_name, verbose=False)
+        learner.evaluate(n_importance_repeats=2, show_progress=False,
+                         verbose=False)
+
+        result = learner.models[model_name]
+        from_importance = (
+            learner.evaluation_result.importance
+            .set_index('feature')['coefficient']
+        )
+        from_result = result.coefficients.set_index('feature')['coefficient']
+        truth = unwrap_pipeline(result.model).get_coefficients()
+
+        # The two row indices come from different sources (the test-set
+        # columns for importance, the pipeline's pre-selection names for the
+        # result), and covering the same feature space is exactly the
+        # invariant being asserted, not a given.
+        assert set(from_importance.index) == set(from_result.index)
+
+        for feature in from_result.index:
+            a, b = from_importance[feature], from_result[feature]
+            if np.isnan(a) or np.isnan(b):
+                assert np.isnan(a) and np.isnan(b), feature
+            else:
+                assert a == pytest.approx(b), feature
+
+        # And both match what the model itself says, per label. Every wrapper
+        # here indexes its coefficients by plain string feature names, so the
+        # labels index both surfaces directly.
+        for feature, value in truth.items():
+            assert from_result[feature] == pytest.approx(value)
+            assert from_importance[feature] == pytest.approx(value)
 
 
 @pytest.mark.integration

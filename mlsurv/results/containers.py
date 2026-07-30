@@ -931,7 +931,9 @@ class ModelResult(DictExportMixin):
         NaN for them. For CoxPH on a rank-deficient design (singular
         Hessian), ``coefficient`` and ``hazard_ratio`` are still
         populated while CI/p-value are NaN. Models with no coefficients
-        (tree/neural) yield a 0-row DataFrame.
+        (tree/neural) yield a 0-row DataFrame, and so does a model whose
+        coefficients could not be placed on their features, which warns
+        with ``MetricFailureWarning``.
 
         Inference caveats: p-values and CIs condition on any data-driven
         feature selection (``topk``/``coxlasso``/``coxnet`` selectors) and
@@ -954,7 +956,7 @@ class ModelResult(DictExportMixin):
             coefficients.
         """
         from mlsurv.evaluation._coefficients import compute_model_coefficients
-        return compute_model_coefficients(self.model)
+        return compute_model_coefficients(self.model, model_name=self.name)
 
     def __getstate__(self):
         state = self.__dict__.copy()

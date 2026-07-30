@@ -526,32 +526,64 @@ def _align_coefficients(coef_values, selected_features, all_features):
     return coef_series.reindex(all_features).values.tolist()
 
 
+def _string_coef_index(coef_series):
+    """Return *coef_series*' index as a list when every label is a string.
+
+    ``None`` otherwise, which covers a missing or empty index, an integer
+    index (lifelines and FSSVM both fall back to one when a model is fit on
+    an unnamed array), and a mixed index. Every element has to be a string:
+    checking only the first would call a half-named index usable and then
+    align the rest by a label that does not exist.
+    """
+    index = getattr(coef_series, 'index', None)
+    # isinstance, not a None check: `list` and `tuple` have an `index` METHOD,
+    # so a wrapper returning a bare list would hand back a bound method here
+    # and raise on len(). Both surfaces accept whatever get_coefficients()
+    # returns, so this has to reject a non-index rather than trust the name.
+    if not isinstance(index, (pd.Index, np.ndarray, list, tuple)):
+        return None
+    if len(index) == 0:
+        return None
+    if not all(isinstance(i, str) for i in index):
+        return None
+    return list(index)
+
+
 def _resolve_coef_labels(coef_series, selected_features, features):
     """Return the labels that key *coef_series*, or None if unresolvable.
 
+    *features* is the target feature space to align onto. Both coefficient
+    surfaces call this, and they name that space differently: the importance
+    table passes the test-set columns, ``_coefficients.py`` passes the
+    pipeline's pre-selection names. Keep the wording here neutral so it stays
+    true for both.
+
     Priority matters:
 
-    1. The model's own coefficient index, when it carries string names and at
-       least one of them is a test feature. Some models return coefficients in
+    1. The model's own coefficient index, when every label is a string and at
+       least one of them is in *features*. Some models return coefficients in
        a different order than the selector emitted them (lifelines'
        Weibull-AFT sorts its covariates), so keying by the selector's order
        would silently attach each value to the wrong feature.
     2. The selector's post-selection names, correct when the model has no
        name index, because then no name-based reordering can have happened.
     3. *features* itself, when the vector is already full length.
+
+    ``None`` means no rung applied. The caller has to decide what to report,
+    because it cannot say which feature any value belongs to.
     """
-    index = getattr(coef_series, 'index', None)
-    if index is not None and len(index) and all(isinstance(i, str) for i in index):
+    index = _string_coef_index(coef_series)
+    if index is not None:
         if set(index) & set(features):
-            # Keying by name is correct per label, so labels the test set does
-            # not have (an intercept, a scale term) simply drop out.
-            return list(index)
+            # Keying by name is correct per label, so labels *features* does
+            # not contain (an intercept, a scale term) simply drop out.
+            return index
         # Names that match nothing (a pipeline fit on unnamed arrays gets
         # sklearn's x0, x1, ...). Those are positional by construction, so
         # fall through to positional alignment.
         logger.debug(
-            "Coefficient index %s matches no test feature; aligning by "
-            "position instead.", list(index),
+            "Coefficient index %s matches no entry in the target feature "
+            "list; aligning by position instead.", index,
         )
     if selected_features is not None:
         return list(selected_features)

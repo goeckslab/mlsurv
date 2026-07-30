@@ -2574,8 +2574,12 @@ class TestModelResultCoefficients:
         (it indexes by feature_names_in_). That is a genuine failure, not
         a benign "no coefficients" skip, so it must warn regardless of the
         warn flag and return the empty sentinel rather than wrong data.
+
+        The category is MetricFailureWarning rather than InternalWarning
+        because the default filters drop InternalWarning, which left this
+        failure reaching the user through no channel at all.
         """
-        from mlsurv._warnings import InternalWarning
+        from mlsurv._warnings import MetricFailureWarning
         from mlsurv.evaluation._coefficients import compute_model_coefficients
         from mlsurv.models import CoxPHModel
 
@@ -2585,7 +2589,7 @@ class TestModelResultCoefficients:
 
         # Even with warn=False (the multi-model sweep path), the genuine
         # extraction error is not swallowed.
-        with pytest.warns(InternalWarning, match="Could not extract"):
+        with pytest.warns(MetricFailureWarning, match="Could not extract"):
             df = compute_model_coefficients(model, warn=False)
         assert list(df.columns) == _COEFFICIENT_COLUMNS
         assert len(df) == 0
@@ -2597,8 +2601,12 @@ class TestModelResultCoefficients:
         column names, so get_coefficients() succeeds but carries a
         non-string index. With no pipeline names to recover, the accessor
         falls back to generic feature_{i} labels and warns.
+
+        SuggestionWarning, not InternalWarning: the default filters drop
+        InternalWarning, and losing the names is actionable (fit on a
+        DataFrame).
         """
-        from mlsurv._warnings import InternalWarning
+        from mlsurv._warnings import SuggestionWarning
         from mlsurv.evaluation._coefficients import compute_model_coefficients
         from mlsurv.models import WeibullAFTModel
 
@@ -2606,9 +2614,30 @@ class TestModelResultCoefficients:
         model = WeibullAFTModel(alpha=0.01)
         model.fit(X.to_numpy(), y)  # no column names
 
-        with pytest.warns(InternalWarning, match="generic feature"):
+        with pytest.warns(SuggestionWarning, match="generic feature"):
             df = compute_model_coefficients(model)
         assert list(df["feature"]) == [f"feature_{i}" for i in range(4)]
+
+    def test_empty_coefficient_vector_is_a_failure_not_a_skip(self):
+        """Returning zero coefficients is not the same as having none.
+
+        None is the documented "this model has no coefficients" answer. An
+        empty vector means the model advertised get_coefficients(), was
+        asked, and handed back nothing, so it warns even under warn=False
+        rather than looking identical to an RSF in the aggregate.
+        """
+        from mlsurv._warnings import MetricFailureWarning
+        from mlsurv.evaluation._coefficients import compute_model_coefficients
+
+        class _EmptyCoefModel:
+            def get_coefficients(self):
+                return pd.Series([], dtype=float)
+
+        with pytest.warns(MetricFailureWarning, match="0 coefficients"):
+            df = compute_model_coefficients(_EmptyCoefModel(), warn=False)
+
+        assert list(df.columns) == _COEFFICIENT_COLUMNS
+        assert len(df) == 0
 
     def test_no_coefficient_model_sentinel(self, coef_learner):
         """RSF: 0-row DataFrame with the full schema + SuggestionWarning."""
@@ -2708,6 +2737,293 @@ class TestModelResultCoefficients:
         for feat, coef in truth.items():
             np.testing.assert_allclose(df.loc[feat, "coefficient"], coef)
 
+    # -- label resolution: cases the two surfaces used to answer differently
+
+    @staticmethod
+    def _stub_pipeline(all_features, selected, coef_index, coefs):
+        """Pipeline with each label source under the test's control.
+
+        The selector step carries the pre-selection names, which is where
+        ``_resolve_all_features`` reads them, and reports its own selection.
+        The model returns its coefficients under whatever index the case
+        needs.
+        """
+        from sklearn.pipeline import Pipeline
+
+        class _Selector:
+            feature_names_in_ = np.array(all_features)
+            selected_features_ = list(selected)
+
+        class _Model:
+            hazard_ratio_valid = False
+
+            def get_coefficients(self):
+                return pd.Series(coefs, index=coef_index)
+
+        return Pipeline([('selector', _Selector()), ('model', _Model())])
+
+    def test_model_order_wins_over_selector_order(self):
+        """A reordered coefficient index keys by name, never by position.
+
+        This is the rule the whole shared resolver exists to enforce:
+        lifelines sorts Weibull-AFT covariates, so a model can hand back its
+        coefficients in an order the selector never emitted. Pinned with a
+        stub rather than a real AFT fit because whether lifelines' sort
+        actually disagrees with the selector's pick depends on the feature
+        names and the seed, which makes a live fit an unreliable guard.
+        Mirrors the importance-side test of the same rule.
+        """
+        from mlsurv.evaluation._coefficients import compute_model_coefficients
+
+        pipeline = self._stub_pipeline(
+            ['a', 'b', 'c', 'd'], ['a', 'b', 'c'],
+            ['c', 'a', 'b'], [3.0, 1.0, 2.0],
+        )
+        df = compute_model_coefficients(pipeline).set_index('feature')
+
+        # Positional keying would read a=3.0, b=1.0, c=2.0.
+        assert df.loc['a', 'coefficient'] == pytest.approx(1.0)
+        assert df.loc['b', 'coefficient'] == pytest.approx(2.0)
+        assert df.loc['c', 'coefficient'] == pytest.approx(3.0)
+        assert np.isnan(df.loc['d', 'coefficient'])
+
+    def test_all_zero_coefficients_keep_their_rows(self):
+        """0.0 is a real coefficient, so the finiteness gate must pass it.
+
+        An all-zero vector is what a fully-penalized L1 fit produces. A
+        truthiness or `.any()`-on-values check would drop every row and
+        report the model as having no coefficients at all.
+        """
+        from mlsurv.evaluation._coefficients import compute_model_coefficients
+
+        pipeline = self._stub_pipeline(
+            ['a', 'b'], ['a', 'b'], ['a', 'b'], [0.0, 0.0],
+        )
+        df = compute_model_coefficients(pipeline).set_index('feature')
+
+        assert len(df) == 2
+        assert (df['coefficient'] == 0.0).all()
+
+    def test_infinite_coefficients_hit_the_same_sentinel_as_nan(self):
+        """isfinite, not notna: an overflowed value is not usable either."""
+        from mlsurv._warnings import MetricFailureWarning
+        from mlsurv.evaluation._coefficients import compute_model_coefficients
+
+        pipeline = self._stub_pipeline(
+            ['a', 'b'], ['a', 'b'], ['a', 'b'], [np.inf, -np.inf],
+        )
+
+        with pytest.warns(MetricFailureWarning, match="no finite"):
+            df = compute_model_coefficients(pipeline)
+
+        assert len(df) == 0
+
+    def test_non_numeric_coefficients_degrade_rather_than_raise(self):
+        """The float cast runs inside the guard, like every other failure.
+
+        SurvivalLearner.coefficients loops with no try of its own, so a
+        wrapper handing back strings must not cost the other models their
+        rows.
+        """
+        from mlsurv._warnings import MetricFailureWarning
+        from mlsurv.evaluation._coefficients import compute_model_coefficients
+
+        pipeline = self._stub_pipeline(
+            ['a', 'b'], ['a', 'b'], ['a', 'b'], ['not', 'numeric'],
+        )
+
+        with pytest.warns(MetricFailureWarning, match="extract"):
+            df = compute_model_coefficients(pipeline, warn=False)
+
+        assert list(df.columns) == _COEFFICIENT_COLUMNS
+        assert len(df) == 0
+
+    @pytest.mark.parametrize(
+        "coef_index, case",
+        [(['x0', 'x1'], "names matching no feature"),
+         (['a', 1], "a mixed string/integer index")],
+    )
+    def test_unusable_index_falls_back_to_the_selector(self, coef_index, case):
+        """An index that cannot key the features must not corrupt the table.
+
+        Both indices passed the old first-element-only string check and were
+        then reindexed onto labels the features did not have, silently and
+        with no warning. They failed differently: ``['x0', 'x1']`` matched
+        nothing, so the whole table came back NaN, while ``['a', 1]`` kept
+        ``a`` and quietly lost ``c``, which is the worse of the two.
+
+        They are also rejected by different guards, so both are worth
+        keeping: ``['a', 1]`` fails ``_string_coef_index`` (not every label
+        is a string), whereas ``['x0', 'x1']`` passes that and fails the
+        intersection check inside ``_resolve_coef_labels``.
+
+        Alignment then falls back to the selector's order. That assumes the
+        model did not reorder its coefficients, which holds for an index
+        that is positional by construction (sklearn's ``x0, x1``) and is the
+        resolver's documented assumption for the rest.
+        """
+        from mlsurv.evaluation._coefficients import compute_model_coefficients
+
+        pipeline = self._stub_pipeline(
+            ['a', 'b', 'c', 'd'], ['a', 'c'], coef_index, [0.5, -0.3],
+        )
+        df = compute_model_coefficients(pipeline).set_index('feature')
+
+        assert list(df.index) == ['a', 'b', 'c', 'd'], case
+        assert df.loc['a', 'coefficient'] == pytest.approx(0.5), case
+        assert df.loc['c', 'coefficient'] == pytest.approx(-0.3), case
+        # Only the selector-dropped features are blank.
+        assert np.isnan(df.loc['b', 'coefficient']), case
+        assert np.isnan(df.loc['d', 'coefficient']), case
+
+    def test_alignment_failure_warns_and_returns_empty(self):
+        """Duplicate labels degrade to the sentinel instead of raising.
+
+        This used to escape as an uncaught ValueError. It must also warn
+        under warn=False: that flag suppresses the benign "no coefficients"
+        skip, not a genuine failure.
+        """
+        from mlsurv._warnings import MetricFailureWarning
+        from mlsurv.evaluation._coefficients import compute_model_coefficients
+
+        pipeline = self._stub_pipeline(['a', 'b'], ['a', 'a'], [0, 1],
+                                       [0.5, -0.3])
+
+        with pytest.warns(MetricFailureWarning, match="align"):
+            df = compute_model_coefficients(pipeline, warn=False)
+
+        assert list(df.columns) == _COEFFICIENT_COLUMNS
+        assert len(df) == 0
+
+    def test_all_nan_alignment_returns_the_sentinel(self):
+        """Nothing finite landed, so report nothing rather than NaN rows.
+
+        A NaN-filled frame passes the ``if not df.empty`` check in
+        ``SurvivalLearner.coefficients`` and would reach feature_summary()
+        and the exports carrying none of the warning that explains it.
+        """
+        from mlsurv._warnings import MetricFailureWarning
+        from mlsurv.evaluation._coefficients import compute_model_coefficients
+
+        # Labels resolve (the selector names them) and align cleanly, but
+        # every value is NaN, so no feature carries a usable coefficient.
+        pipeline = self._stub_pipeline(
+            ['a', 'b'], ['a', 'b'], [0, 1], [np.nan, np.nan],
+        )
+
+        with pytest.warns(MetricFailureWarning, match="no finite"):
+            df = compute_model_coefficients(pipeline)
+
+        assert list(df.columns) == _COEFFICIENT_COLUMNS
+        assert len(df) == 0
+
+    def test_unmatched_labels_are_reported_and_flagged(self):
+        """Rows keyed by the model's own vocabulary have to say so.
+
+        The resolver gives up when a string index matches no feature, no
+        selector reports a selection, and the lengths differ. The values are
+        still worth showing, but the feature column is then the model's
+        labels rather than the pipeline's, which the user cannot tell by
+        looking.
+        """
+        from mlsurv._warnings import MetricFailureWarning
+        from mlsurv.evaluation._coefficients import compute_model_coefficients
+        from sklearn.pipeline import Pipeline
+
+        class _Selector:  # names the features, reports no selection
+            feature_names_in_ = np.array(['a', 'b', 'c'])
+
+        class _Model:
+            hazard_ratio_valid = False
+
+            def get_coefficients(self):
+                return pd.Series([0.5, -0.3], index=['x0', 'x1'])
+
+        pipeline = Pipeline([('selector', _Selector()), ('model', _Model())])
+
+        with pytest.warns(MetricFailureWarning, match="could not be matched"):
+            df = compute_model_coefficients(pipeline, warn=False)
+
+        assert list(df['feature']) == ['x0', 'x1']
+        assert df['coefficient'].notna().all()
+
+    def test_named_pipeline_with_unnamed_coefficients_is_not_a_lost_names_skip(
+            self):
+        """Positional rows under a named pipeline are a placement failure.
+
+        The pipeline knows its feature names here, so telling the user to
+        fit on a DataFrame would be false advice. It is also ungated,
+        because the rows below are numbered rather than named and would
+        otherwise reach feature_summary() looking like real features with no
+        way to tell.
+        """
+        from mlsurv._warnings import MetricFailureWarning
+        from mlsurv.evaluation._coefficients import compute_model_coefficients
+        from sklearn.pipeline import Pipeline
+
+        class _Selector:  # names the features, reports no usable selection
+            feature_names_in_ = np.array(['a', 'b', 'c'])
+
+        class _Model:
+            hazard_ratio_valid = False
+
+            def get_coefficients(self):
+                return pd.Series([0.5, -0.3], index=[0, 1])
+
+        pipeline = Pipeline([('selector', _Selector()), ('model', _Model())])
+
+        with pytest.warns(MetricFailureWarning, match="no usable names"):
+            df = compute_model_coefficients(pipeline, warn=False)
+
+        # position_, not feature_: this branch only runs when the pipeline has
+        # real names, and `feature_0` is a name a real feature can have. The
+        # feature_summary() join would silently pair a positional row with a
+        # real feature of the same name.
+        assert list(df['feature']) == ['position_0', 'position_1']
+
+    def test_the_finiteness_gate_covers_the_unlabeled_paths_too(self):
+        """An all-NaN table is nothing computed however its rows got named.
+
+        The gate used to sit inside the aligned branch only, so a model that
+        reached the positional path with NaN values still returned a
+        NaN-filled frame, which passes the non-empty checks downstream.
+        """
+        from mlsurv._warnings import MetricFailureWarning
+        from mlsurv.evaluation._coefficients import compute_model_coefficients
+
+        class _Model:  # no pipeline, so the positional path
+            hazard_ratio_valid = False
+
+            def get_coefficients(self):
+                return pd.Series([np.nan, np.nan], index=[0, 1])
+
+        with pytest.warns(MetricFailureWarning, match="no finite value"):
+            df = compute_model_coefficients(_Model(), warn=False)
+
+        assert len(df) == 0
+
+    def test_generic_names_notice_is_gated_by_warn(self):
+        """warn=False silences the benign skips, and only those.
+
+        The aggregate accessor passes warn=False, so the gated half of that
+        contract is what it actually exercises. Losing the names is a skip,
+        not a failure: the rows are still real, they are just labeled
+        positionally.
+        """
+        from mlsurv.evaluation._coefficients import compute_model_coefficients
+
+        class _Model:  # no pipeline, non-string index, so no names anywhere
+            hazard_ratio_valid = False
+
+            def get_coefficients(self):
+                return pd.Series([0.5, -0.3], index=[0, 1])
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            df = compute_model_coefficients(_Model(), warn=False)
+
+        assert list(df['feature']) == ['feature_0', 'feature_1']
+
     def test_wald_matches_lifelines(self):
         """Wald p-values + CIs match a lifelines CoxPHFitter refit."""
         from lifelines import CoxPHFitter
@@ -2745,6 +3061,73 @@ class TestModelResultCoefficients:
             )
 
 
+class TestStringCoefIndex:
+    """The shared predicate both coefficient surfaces resolve labels with.
+
+    Tested directly because two of its answers are hard to reach through
+    either caller, and because getting one of them wrong is what put every
+    coefficient on the wrong feature before.
+    """
+
+    @pytest.mark.parametrize("index, expected", [
+        (['a', 'b'], ['a', 'b']),
+        ([], None),
+        ([0, 1], None),
+        (['a', 1], None),
+    ])
+    def test_only_an_all_string_index_is_usable(self, index, expected):
+        from mlsurv.evaluation.importance import _string_coef_index
+
+        series = pd.Series([1.0] * len(index), index=index, dtype=float)
+        assert _string_coef_index(series) == expected
+
+    def test_multiindex_is_rejected(self):
+        """lifelines' params_ is a MultiIndex, so this is a live shape.
+
+        Tuples are not strings, so the index cannot key features by name and
+        the resolver has to fall back rather than align tuples positionally.
+        The Weibull-AFT wrapper flattens to the lambda_ block before we ever
+        see it, which is what keeps that model on the by-name path.
+        """
+        from mlsurv.evaluation.importance import _string_coef_index
+
+        series = pd.Series([1.0, 2.0], index=pd.MultiIndex.from_tuples(
+            [('lambda_', 'b'), ('lambda_', 'a')],
+        ))
+        assert _string_coef_index(series) is None
+
+    def test_a_bare_array_has_no_index(self):
+        from mlsurv.evaluation.importance import _string_coef_index
+
+        assert _string_coef_index(np.array([1.0, 2.0])) is None
+
+    @pytest.mark.parametrize("returned", [[0.5, 0.3], (0.5, 0.3)])
+    def test_a_list_or_tuple_index_attribute_is_not_an_index(self, returned):
+        """`list.index` is a METHOD, so a name check alone would crash.
+
+        A wrapper returning a bare list used to reach `len(index)` on the
+        bound method and raise TypeError, which escaped every guard and took
+        down the whole aggregate table.
+        """
+        from mlsurv.evaluation.importance import _string_coef_index
+
+        assert _string_coef_index(returned) is None
+
+    def test_a_bare_list_return_degrades_rather_than_crashing(self):
+        """The same shape, end to end through the accessor."""
+        from mlsurv.evaluation._coefficients import compute_model_coefficients
+
+        class _Model:
+            hazard_ratio_valid = False
+
+            def get_coefficients(self):
+                return [0.5, -0.3]
+
+        df = compute_model_coefficients(_Model(), warn=False)
+        assert list(df['feature']) == ['feature_0', 'feature_1']
+        assert df['coefficient'].tolist() == [0.5, -0.3]
+
+
 class TestLearnerCoefficients:
     """SurvivalLearner.coefficients long-format accessor."""
 
@@ -2770,6 +3153,52 @@ class TestLearnerCoefficients:
             warnings.simplefilter("error")  # any warning -> failure
             df = coef_learner.coefficients
         assert set(df["model_type"]) == {"coxph", "coxnet"}
+
+    def test_one_failing_model_keeps_the_others(self, coef_learner):
+        """The aggregate loops every model with no guard of its own.
+
+        A coefficient failure on one model used to raise out of the loop and
+        cost every other model its rows, and the report the whole feature
+        table with them.
+        """
+        from mlsurv._warnings import MetricFailureWarning
+
+        coef_learner.models["coxnet"].model = (
+            TestModelResultCoefficients._stub_pipeline(
+                ["a", "b"], ["a", "a"], [0, 1], [0.5, -0.3],
+            )
+        )
+
+        # Named by its registry key, not its wrapper class: that is the name
+        # the user asked for and the one the model_type column shows.
+        with pytest.warns(MetricFailureWarning, match="coxnet"):
+            df = coef_learner.coefficients
+
+        assert set(df["model_type"]) == {"coxph"}
+        assert df["coefficient"].notna().all()
+
+    def test_a_dropped_model_does_not_break_feature_summary(self, coef_learner):
+        """feature_summary() is where the dropped rows actually show up.
+
+        It joins the coefficient table onto the per-feature summary, so a
+        model returning no rows has to leave the other models' columns
+        intact rather than misaligning the join.
+        """
+        from mlsurv._warnings import MetricFailureWarning
+
+        coef_learner.models["coxnet"].model = (
+            TestModelResultCoefficients._stub_pipeline(
+                ["a", "b"], ["a", "a"], [0, 1], [0.5, -0.3],
+            )
+        )
+
+        with pytest.warns(MetricFailureWarning):
+            summary = coef_learner.feature_summary()
+
+        assert not summary.empty
+        # coxph still carries its multivariable coefficients.
+        coxph_rows = summary[summary["model_type"] == "coxph"]
+        assert coxph_rows["mv_coefficient"].notna().any()
 
     def test_empty_before_training(self):
         """No trained models: 0-row DataFrame with full schema."""

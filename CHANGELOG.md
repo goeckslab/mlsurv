@@ -9,6 +9,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The coefficient table and the importance table can no longer disagree about
+  which feature a coefficient belongs to.** Two code paths decided which label
+  keys a model's coefficient vector, and they decided it separately. lifelines
+  sorts Weibull-AFT covariates, so a model can return its coefficients in an
+  order the feature selector never emitted, and the two paths handled that
+  differently: the same fitted model reported different coefficients depending
+  on whether you read `EvaluationResult.importance` or
+  `ModelResult.coefficients`. Both now resolve labels through one shared
+  function, so they agree by construction. Two narrower faults went with it: a
+  coefficient index whose labels matched no feature produced a table of nothing
+  but NaN, with no warning, and an index that was only partly named (a string
+  first label, numbers after) kept the first coefficient and quietly dropped
+  the rest onto the wrong rows.
+- **One model's coefficient problem no longer costs every other model its
+  rows.** `SurvivalLearner.coefficients` loops over every trained model with no
+  guard, so a `ValueError` from aligning one model's coefficients escaped and
+  emptied the whole table, taking the report's feature-analysis table with it.
+  A model whose coefficients cannot be placed on its features is now reported
+  and skipped, and the rest of the table survives.
+- **Coefficient failures now reach the user.** Four ways of failing to produce
+  a coefficient table were invisible. A model that raised inside
+  `get_coefficients()` warned through a category the default filters drop and
+  wrote no log record either, so nothing appeared anywhere. A model that
+  returned an empty coefficient vector was treated as though it had no
+  coefficients at all, which looks the same as a random survival forest. A
+  table of nothing but NaN was returned as a result rather than reported as a
+  failure, and it passed the non-empty checks downstream, so it reached
+  `feature_summary()` and the exports. Losing the feature names to an unnamed
+  array was reported through the same dropped category. All four now warn
+  visibly and name the model, and the two that computed nothing usable return
+  an empty table rather than a NaN-filled one.
 - **An unbounded hazard ratio no longer costs you the whole Feature Analysis
   report section.** A separated or badly scaled feature makes the univariate
   Cox `exp(coef + 1.96 * se)` overflow to infinity. That infinity reached the

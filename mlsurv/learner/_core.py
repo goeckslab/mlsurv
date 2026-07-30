@@ -476,7 +476,14 @@ class SurvivalLearner(
         -------
         pd.DataFrame
             0-row DataFrame (with full column schema) when no trained
-            model exposes coefficients.
+            model exposes coefficients. A model is also omitted when its
+            coefficients could not be produced or placed at all, which
+            warns with ``MetricFailureWarning``. A model whose labels
+            could not be tied to the pipeline's features still contributes
+            rows, keyed by its own coefficient index or by position, and
+            warns the same way. So a ``MetricFailureWarning`` means one
+            model's rows are missing or are not keyed by your feature
+            names; silence means every row is.
 
         See Also
         --------
@@ -490,7 +497,9 @@ class SurvivalLearner(
         )
         frames = []
         for name, model_result in self._state.models.items():
-            df = compute_model_coefficients(model_result.model, warn=False)
+            df = compute_model_coefficients(
+                model_result.model, warn=False, model_name=name,
+            )
             if not df.empty:
                 df.insert(0, 'model_type', name)
                 frames.append(df)
