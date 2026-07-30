@@ -7622,63 +7622,76 @@ class TestReportPolish:
 class TestSummaryStratificationRows:
     """Direct branch coverage for _summary_stratification_rows.
 
-    The helper takes a learner (public ``cv_strategy`` accessor + exempt
-    ``_state`` getattrs), so a SimpleNamespace stub is enough.
+    The helper reads the two labels setup() records (``stratify_spec`` for the
+    split, ``cv_stratify_spec`` for the folds), so a SimpleNamespace stub is
+    enough.
     """
 
     @staticmethod
-    def _learner(presplit=False, subpops=None, strat_arr=None,
-                 cv_strategy='stratifiedkfold'):
+    def _learner(presplit=False, stratify_spec="event", cv_stratify_spec="event"):
         from types import SimpleNamespace
         state = SimpleNamespace(
             presplit=presplit,
-            subpopulations_train=subpops,
-            stratify_array=strat_arr,
+            stratify_spec=stratify_spec,
+            cv_stratify_spec=cv_stratify_spec,
         )
-        return SimpleNamespace(_state=state, cv_strategy=cv_strategy)
+        return SimpleNamespace(_state=state, cv_strategy='stratifiedkfold')
 
     def test_default_split_row_only(self):
+        """Folds matching the split add nothing, so the CV row is left out."""
         from mlsurv.reports.sections.data_preprocessing import (
             _summary_stratification_rows,
         )
         rows = _summary_stratification_rows(self._learner())
         assert rows == [["Split stratification", "Event status"]]
 
-    def test_presplit_skips_split_row(self):
+    def test_presplit_skips_split_row_but_keeps_the_cv_row(self):
+        """Pre-split data has no split to describe, but the folds still stratify.
+
+        The CV row is dropped only when it would restate the split row. There is
+        no split row here, so the CV row is the only place the reader learns how
+        the folds were built.
+        """
         from mlsurv.reports.sections.data_preprocessing import (
             _summary_stratification_rows,
         )
         rows = _summary_stratification_rows(self._learner(presplit=True))
-        assert rows == []
+        assert rows == [["CV stratification", "Event status"]]
 
-    def test_subpopulations_with_string_stratify_array(self):
-        import numpy as np
+    def test_cv_row_when_folds_differ_from_split(self):
         from mlsurv.reports.sections.data_preprocessing import (
             _summary_stratification_rows,
         )
         rows = _summary_stratification_rows(self._learner(
-            subpops={'race': object()},
-            strat_arr=np.array(['e0_A', 'e1_B']),
+            stratify_spec="event",
+            cv_stratify_spec="event × subpopulation(race)",
         ))
-        assert ["Split stratification", "Event status × race"] in rows
-        assert ["CV stratification", "Event × race"] in rows
+        assert ["Split stratification", "Event status"] in rows
+        assert ["CV stratification", "Event × subpopulation(race)"] in rows
 
-    def test_subpopulations_with_numeric_stratify_array(self):
-        import numpy as np
+    def test_list_stratify_label(self):
+        """A stratify= list is reported as the joined variable names."""
         from mlsurv.reports.sections.data_preprocessing import (
             _summary_stratification_rows,
         )
         rows = _summary_stratification_rows(self._learner(
-            subpops={'race': object()},
-            strat_arr=np.array([0, 1]),
+            stratify_spec="event × stage", cv_stratify_spec="event × stage",
         ))
-        assert ["CV stratification", "Event status"] in rows
+        assert rows == [["Split stratification", "Event × stage"]]
+
+    def test_column_stratify_label_not_reported_as_event(self):
+        """A named column must not be reported as event stratification."""
+        from mlsurv.reports.sections.data_preprocessing import (
+            _summary_stratification_rows,
+        )
+        rows = _summary_stratification_rows(self._learner(
+            stratify_spec="stage", cv_stratify_spec="stage",
+        ))
+        assert rows == [["Split stratification", "stage"]]
 
     def test_non_stratified_cv_skips_cv_row(self):
         from mlsurv.reports.sections.data_preprocessing import (
             _summary_stratification_rows,
         )
-        rows = _summary_stratification_rows(self._learner(
-            subpops={'race': object()}, cv_strategy='kfold',
-        ))
+        rows = _summary_stratification_rows(self._learner(cv_stratify_spec=None))
         assert not any(r[0] == "CV stratification" for r in rows)

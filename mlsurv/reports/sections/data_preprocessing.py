@@ -60,25 +60,58 @@ def _summary_time_rows(all_times, time_unit):
     ]
 
 
-def _summary_stratification_rows(learner):
-    """Build split/CV stratification rows from the learner."""
-    rows = []
-    subpops_train = getattr(learner._state, 'subpopulations_train', None)
-    if not getattr(learner._state, 'presplit', False):
-        stratify_desc = "Event status"
-        if subpops_train:
-            first_key = next(iter(subpops_train))
-            stratify_desc += f" \u00d7 {first_key}"
-        rows.append(["Split stratification", stratify_desc])
+def _pretty_stratify_label(spec):
+    """Render a recorded stratify label for the report table.
 
-    cv_strat = learner.cv_strategy
-    if cv_strat == 'stratifiedkfold' and subpops_train:
-        first_key = next(iter(subpops_train))
-        strat_arr = getattr(learner._state, 'stratify_array', None)
-        if strat_arr is not None and hasattr(strat_arr, 'dtype') and strat_arr.dtype.kind == 'U':
-            rows.append(["CV stratification", f"Event \u00d7 {first_key}"])
+    Only the leading ``event`` token is capitalized: the rest of a composite
+    label is column names, which must stay as the user spelled them. ``"none"``
+    is capitalized too, so it reads alongside the ``"None (...)"`` descriptions
+    the caller builds for splits that never stratify.
+    """
+    if spec == "event":
+        return "Event status"
+    if spec == "none":
+        return "None"
+    if spec.startswith("event "):
+        return "Event" + spec[len("event"):]
+    return spec
+
+
+def _summary_stratification_rows(learner):
+    """Build split/CV stratification rows from the labels setup recorded.
+
+    Both labels come from state (`stratify_spec`, `cv_stratify_spec`), which
+    setup() writes after any binning, subpopulation augmentation, or rare-cell
+    fallback.
+
+    The CV row is dropped only when it would restate the split row word for
+    word. It must survive the cases where the split row says something else:
+    a group-aware or temporal split is not stratified at all, yet the folds
+    still can be, and suppressing the row there would hide a balance that WAS
+    applied. Pre-split data has no split row to repeat, so the CV row always
+    stands on its own.
+    """
+    split_spec = getattr(learner._state, 'stratify_spec', None) or "event"
+    presplit = getattr(learner._state, 'presplit', False)
+
+    rows = []
+    split_desc = None
+    if not presplit:
+        # Two split strategies ignore stratification entirely, so reporting the
+        # resolved labels there would claim a balance that was never applied.
+        if getattr(learner._state, 'group_aware_holdout', False):
+            split_desc = "None (group-aware holdout keeps groups intact)"
+        elif learner.cv_strategy == 'timeseries':
+            split_desc = "None (temporal split, ordered not shuffled)"
         else:
-            rows.append(["CV stratification", "Event status"])
+            split_desc = _pretty_stratify_label(split_spec)
+        rows.append(["Split stratification", split_desc])
+
+    cv_spec = getattr(learner._state, 'cv_stratify_spec', None)
+    if cv_spec is not None:
+        cv_desc = _pretty_stratify_label(cv_spec)
+        if cv_desc != split_desc:
+            rows.append(["CV stratification", cv_desc])
     return rows
 
 

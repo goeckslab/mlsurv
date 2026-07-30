@@ -926,6 +926,51 @@ class TestCollapseRareLevels:
         assert failed is True
         assert combined is None
 
+    def test_base_values_not_assumed_to_be_zero_and_one(self):
+        """A cohort where everyone has the event still stratifies.
+
+        The merge rule counts cells across the base values actually present.
+        Assuming {0, 1} would score every level as empty on the missing class
+        and collapse the lot.
+        """
+        from mlsurv.learner._setup import _collapse_rare_levels
+
+        events = np.ones(20, dtype=bool)
+        sg = np.array(['A'] * 10 + ['B'] * 10)
+
+        combined, merged, failed = _collapse_rare_levels(events, sg, threshold=5)
+
+        assert merged == []
+        assert failed is False
+        assert set(np.unique(combined)) == {'1_A', '1_B'}
+
+    def test_three_variables_via_joined_level_axis(self):
+        """Callers join extra variables into the level axis before collapsing.
+
+        This is how the ``stratify=`` list form supports more than two
+        variables: a rare *combination* merges as one unit.
+        """
+        from mlsurv.learner._setup import (
+            _collapse_rare_levels, _join_stratify_keys,
+        )
+
+        events = np.array([0, 1] * 12)
+        # A clears the threshold alone; B and C each fall short but together
+        # fill one __other__ bucket that clears it.
+        stage = np.array(['A'] * 12 + ['B'] * 6 + ['C'] * 6)
+        site = np.array(['x'] * 24)
+
+        levels = _join_stratify_keys([stage, site])
+        combined, merged, failed = _collapse_rare_levels(
+            events, levels, threshold=5,
+        )
+
+        assert sorted(merged) == ['B_x', 'C_x']
+        assert failed is False
+        assert set(np.unique(combined)) == {
+            '0_A_x', '1_A_x', '0___other__', '1___other__',
+        }
+
 
 @pytest.mark.integration
 class TestSetupAugmentStratify:

@@ -299,17 +299,12 @@ class ModelDevelopmentSection(BaseSection):
         """
         if cv_strategy != 'stratifiedkfold':
             return None
-        spec = getattr(self.learner._state, 'stratify_spec', None)
+        # cv_stratify_spec is recorded by setup() after any subpopulation
+        # augmentation or rare-cell fallback, so it names what the folds
+        # actually balance on rather than what was requested.
+        spec = getattr(self.learner._state, 'cv_stratify_spec', None)
         if spec is None:
-            spec = 'event'
-        subpops_train = getattr(self.learner._state, 'subpopulations_train', None)
-        strat_subpops = getattr(self.learner._state, 'stratify_subpopulations', True)
-        if strat_subpops and subpops_train:
-            # Augmentation in _setup.py uses only the first key; the label
-            # mirrors that. A SuggestionWarning is emitted at setup time when
-            # additional keys are silently ignored.
-            first_key = next(iter(subpops_train))
-            return f"{spec} × subpopulation({first_key})"
+            spec = getattr(self.learner._state, 'stratify_spec', None) or 'event'
         return spec
 
     # ------------------------------------------------------------------

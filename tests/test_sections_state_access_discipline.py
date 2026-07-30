@@ -80,6 +80,8 @@ _EXEMPT_STATE_FIELDS = {
     'subpopulations_test',
     'subpopulations_train',
     'stratify_spec',
+    'cv_stratify_spec',
+    'group_aware_holdout',
     'stratify_subpopulations',
     'presplit',
     'stratify_array',

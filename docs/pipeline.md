@@ -58,6 +58,7 @@ learner.setup(
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `test_fraction` | 0.3 | Fraction of data held out for testing |
+| `stratify` | `'event'` | What the split and folds keep balanced (see [Stratification](#stratification)) |
 | `cv_folds` | 5 | Number of cross-validation folds |
 | `scoring` | `'harrell'` | Metric for model optimization (Harrell's C-index<sup>[1](#references)</sup>; see [Evaluation Metrics](evaluation.md#evaluation-metrics)) |
 | `random_state` | `None` | Seeds all frameworks (scikit-learn<sup>[2](#references)</sup>, XGBoost, PyTorch) |
@@ -81,13 +82,37 @@ setup → train / run → evaluate → bootstrap → validate → report
 | Strategy | Use Case | Configuration |
 |----------|----------|---------------|
 | Stratified K-Fold | General use (default) | `cv_folds=5` |
-| GroupKFold | Clustered observations | `cv_strategy='group'`, `groups=group_labels` |
+| GroupKFold | Clustered observations | `cv_strategy='groupkfold'`, `groups=group_labels` |
 | TimeSeriesSplit | Temporally ordered data | `cv_strategy='timeseries'` |
 | Repeated CV | Small datasets, improved stability | `cv_repeats=3` |
 | Pre-split data | External train/test split | `X_test=X_test, y_test=y_test` |
 | Custom CV object | Any scikit-learn splitter | `cv_strategy=custom_splitter` |
 
-Stratified splitting maintains event ratios across partitions to prevent imbalanced evaluation.
+### Stratification
+
+By default the train/test split and the CV folds keep the **event ratio** balanced. Pass a list to balance more than one variable at once:
+
+```python
+learner.setup(stratify=['event', 'stage'])            # event x stage
+learner.setup(stratify=['event', 'stage', 'site'])    # any number of entries
+```
+
+Each entry is `'event'`, a column name from `X`, or a label array; you can mix them. mlsurv builds one composite key per patient and stratifies on that, so every event x stage combination keeps its share in the training set, the test set, and each fold.
+
+Stratification adapts to what the data can support. Each adjustment below comes with a warning, so none of it happens quietly:
+
+- **Wide columns are binned.** An entry naming a column with more than 20 distinct values (`age`, say) is cut into quantile groups. Stratifying on it raw would create roughly one stratum per patient. Bin it yourself first if you want your own cut points.
+- **Useless entries are dropped.** A constant column, or one whose values are too tied to bin, cannot separate anything, so it leaves the keys. If no entry survives, `setup()` raises instead of quietly not stratifying.
+- **Rare combinations merge.** A combination with too few patients joins an `__other__` bucket with the other rare ones. The common combinations stratify normally. With a single entry there is no combination to merge, so rare levels fold into the most common level.
+- **Stratification backs off rather than failing.** With two or more entries, if even the merged bucket is too small, mlsurv falls back to the first entry alone; with a single entry the stage is left unstratified. It also backs off when the keys outnumber the rows on the smaller side of the split, which `train_test_split` cannot satisfy.
+
+The split and the folds are checked separately, against different thresholds: the split needs 2 patients per cell across the whole cohort, each fold needs one per cell for every fold it will cut (`cv_folds`, or the count `cv_folds='auto'` resolves to) within the training rows. So the folds sometimes merge or back off where the split did not. When that happens the report shows both a "Split stratification" and a "CV stratification" row, so you can see the difference.
+
+A list takes precedence over `stratify_subpopulations`: declaring a subpopulation no longer adds it to the keys, since the list already says what to balance. Add its name to `stratify=` if you want both.
+
+`stratify` is ignored when the split cannot honour it: with pre-split data, with `cv_strategy='timeseries'` (ordered, not shuffled), and for the holdout itself when `groups` is given. The report says so rather than naming a balance that was never applied.
+
+`stratify='column'` (a single name) balances that column *instead of* the event indicator, `stratify=None` disables stratification, and an array is used as the labels directly.
 
 `cv_strategy='timeseries'` splits the data with `shuffle=False` (earliest rows become train, latest rows become test) and the CV folds forward-chain over the training rows. This only yields a true past→future split if **the rows are already sorted chronologically by entry/diagnosis time** before `setup()`. mlsurv does not sort or verify the order, so it emits a `SuggestionWarning` whenever this strategy is selected; if the rows are not in chronological order, the split and folds are not temporal and the out-of-sample estimate is invalid. Sort your data first (e.g. `X = X.sort_values('year'); y = y[X.index]`).
 

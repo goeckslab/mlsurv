@@ -79,10 +79,25 @@ class LearnerState:
     # True when the train/test holdout was split group-aware (keeps whole
     # groups together) because `groups` was supplied to setup().
     group_aware_holdout: bool = False
-    # Display label for the user-supplied stratify spec (column name,
-    # "event", "none", or "custom stratify array"). Used by reports; the
-    # resolved/augmented array is stratify_array above.
+    # What the train/test split actually stratified on, as a display label:
+    # "event", a column name, "none", "custom stratify array", or a composite
+    # such as "event x stage" or "event x subpopulation(site)". Recorded by the
+    # split methods AFTER any binning, augmentation, or rare-level fallback, so
+    # it says what happened rather than what setup() was asked for. Reports read
+    # it; the array itself is stratify_array above.
     stratify_spec: Any = "event"
+    # The same, for the CV folds, which apply their own rare-level threshold and
+    # see only the training rows. Equal to stratify_spec when both stages landed
+    # in the same place (including when both backed out). None when the folds are
+    # not stratified at all (cv_strategy is not stratifiedkfold), which reports
+    # treat as "no CV row". "event" when nothing resolved, because _get_cv_folds
+    # then falls back to the event indicator.
+    cv_stratify_spec: Any = None
+    # Resolved [(label, values), ...] behind a list-form stratify=, sliced to
+    # the training rows. Kept so CV can rebuild the composite keys at its own
+    # rare-level threshold. None for the scalar and array forms, for pre-split
+    # data, and for a list under cv_strategy='timeseries' (never stratified).
+    stratify_components: Any = None
     stratify_subpopulations: bool = True
 
     # -- Descriptive (set in setup) --------------------------------------

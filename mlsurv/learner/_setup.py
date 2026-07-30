@@ -112,6 +112,10 @@ def _stratify_display_label(stratify) -> str:
     available, ``"none"`` for ``None``, or ``"custom stratify array"`` for an
     unnamed array. The label is interpolated into markdown so it intentionally
     avoids characters that markdown/HTML would escape (e.g. angle brackets).
+
+    Only reached for the scalar and array forms: a list that resolved to a spec
+    is labelled from its resolved components instead, so a list arriving here is
+    one label per sample and reads as a plain array.
     """
     if isinstance(stratify, str):
         return stratify
@@ -421,65 +425,339 @@ def _warn_missingness_leakage(flagged):
 
 _OTHER_BUCKET = "__other__"
 
+# Above this many distinct values a variable stops behaving like a stratum and
+# starts behaving like an identifier. Shared by the ``stratify=`` list form
+# (which auto-bins a numeric column at this point) and the subpopulation
+# validator (which warns at it).
+MAX_STRATIFY_LEVELS = 20
 
-def _collapse_rare_levels(events, sg_labels, threshold):
-    """Build event x subpopulation stratify keys, merging rare levels.
+# Quantile groups used when auto-binning a high-cardinality numeric column
+# named in ``stratify=``.
+STRATIFY_QUANTILE_BINS = 4
+
+# Label for an array entry with no name of its own. Entries carrying this label
+# are numbered rather than deduplicated, since two arrays that share it are
+# still two different variables.
+_GENERIC_STRATIFY_LABEL = "custom stratify array"
+
+
+def _as_key_strings(labels):
+    """Render a label array as strings for composite stratification keys.
+
+    Boolean and whole-number arrays render as plain integers, so an event
+    indicator keeps reading as ``"0"`` / ``"1"`` and a float-coded category
+    does not carry a trailing ``".0"`` into the key. Everything else falls
+    back to ``str``.
+    """
+    arr = np.asarray(labels)
+    if arr.dtype.kind in "bi":
+        return arr.astype(int).astype(str)
+    if arr.dtype.kind == "f":
+        finite = np.isfinite(arr)
+        if np.array_equal(arr[finite], arr[finite].astype(int)):
+            # Non-finite values keep their own names. Calling every one of them
+            # "nan" would silently group +inf, -inf, and missing together.
+            out = np.where(np.isnan(arr), "nan",
+                           np.where(arr > 0, "inf", "-inf")).astype(object)
+            out[finite] = arr[finite].astype(int).astype(str)
+            return out.astype(str)
+    return arr.astype(str)
+
+
+def _join_stratify_keys(arrays):
+    """Join label arrays element-wise into one composite key array."""
+    rendered = [_as_key_strings(a) for a in arrays]
+    return np.array(["_".join(parts) for parts in zip(*rendered)])
+
+
+def _collapse_rare_levels(base_labels, level_labels, threshold):
+    """Build composite ``base x level`` stratify keys, merging rare levels.
+
+    The base axis is preserved as-is; only the level axis collapses. Callers
+    that stratify on more than two variables join the extra ones into
+    ``level_labels`` first (see ``_join_stratify_keys``), so a rare
+    *combination* is what gets merged.
 
     Parameters
     ----------
-    events : array-like of {0, 1}
-        Event indicator per sample.
-    sg_labels : array-like
-        Subpopulation level per sample.
+    base_labels : array-like
+        Labels held fixed, typically the event indicator. There is always a base
+        axis; the one-variable case goes through ``_merge_rare_into_modal``
+        instead, because an ``__other__`` bucket with no base axis to fall back
+        to is usually just the rare rows again, still under the threshold.
+    level_labels : array-like
+        Level per sample; rare levels here are the ones merged.
     threshold : int
-        Minimum required samples per (event x level) cell.
+        Minimum required samples per (base x level) cell.
 
     Returns
     -------
     combined : np.ndarray of str or None
-        Stratify keys ``"<event>_<level>"`` with rare levels replaced by
-        ``__other__``. ``None`` when even the merged bucket fails.
+        Stratify keys ``"<base>_<level>"`` with rare levels replaced by
+        ``__other__``. ``None`` when even the merged bucket fails, or when there
+        is nothing to count.
     merged_levels : list
         Levels that were merged into ``__other__`` (empty when no merge
         was needed).
     fully_failed : bool
         ``True`` when the merged ``__other__`` bucket itself is below
-        ``threshold`` and the caller should fall back to event-only.
+        ``threshold`` and the caller should fall back to the base labels.
     """
-    events = np.asarray(events)
-    sg_labels = np.asarray(sg_labels)
-    if len(events) != len(sg_labels):
+    base_labels = np.asarray(base_labels)
+    level_labels = np.asarray(level_labels)
+    if len(base_labels) != len(level_labels):
         raise ValueError(
-            f"events ({len(events)}) and sg_labels ({len(sg_labels)}) "
-            f"must have the same length"
+            f"base_labels ({len(base_labels)}) and level_labels "
+            f"({len(level_labels)}) must have the same length"
         )
-    if len(events) == 0:
+    if len(level_labels) == 0:
         return None, [], True
-    events_int = events.astype(int)
+    base_keys = _as_key_strings(base_labels)
+    # Only the base values actually present count. Hard-coding {0, 1} would
+    # declare every level rare on a cohort where no one is censored.
+    base_values = list(dict.fromkeys(base_keys.tolist()))
 
-    cell_counts = Counter(zip(events_int, sg_labels))
-    levels = list(dict.fromkeys(sg_labels.tolist()))
+    cell_counts = Counter(zip(base_keys, level_labels))
+    levels = list(dict.fromkeys(level_labels.tolist()))
 
     merged_levels = [
         level for level in levels
-        if min(cell_counts.get((e, level), 0) for e in (0, 1)) < threshold
+        if min(cell_counts.get((b, level), 0) for b in base_values) < threshold
     ]
 
     if not merged_levels:
-        combined = np.array([f"{e}_{s}" for e, s in zip(events_int, sg_labels)])
+        combined = np.array([f"{b}_{s}" for b, s in zip(base_keys, level_labels)])
         return combined, [], False
 
     merged_set = set(merged_levels)
     relabeled = np.array(
-        [_OTHER_BUCKET if s in merged_set else s for s in sg_labels]
+        [_OTHER_BUCKET if s in merged_set else s for s in level_labels]
     )
-    collapsed_counts = Counter(zip(events_int, relabeled))
-    other_min = min(collapsed_counts.get((e, _OTHER_BUCKET), 0) for e in (0, 1))
+    collapsed_counts = Counter(zip(base_keys, relabeled))
+    other_min = min(
+        collapsed_counts.get((b, _OTHER_BUCKET), 0) for b in base_values
+    )
     if other_min < threshold:
         return None, merged_levels, True
 
-    combined = np.array([f"{e}_{s}" for e, s in zip(events_int, relabeled)])
+    combined = np.array([f"{b}_{s}" for b, s in zip(base_keys, relabeled)])
     return combined, merged_levels, False
+
+
+def _merge_rare_into_modal(level_labels, threshold):
+    """Fold levels below *threshold* into the most common level.
+
+    Used when there is no base axis, i.e. a one-variable ``stratify=`` list.
+    An ``__other__`` bucket is no help there: on its own it is usually just the
+    rare rows again, still under the threshold. Folding them into the modal
+    level keeps the balance the user asked for on everyone else, at the cost of
+    those few rows not being distinguished.
+
+    Returns ``(keys, merged_levels, fully_failed)`` to match
+    ``_collapse_rare_levels``. ``fully_failed`` means fewer than two usable
+    groups survive, so there is nothing left to stratify on.
+    """
+    keys = _as_key_strings(level_labels)
+    counts = Counter(keys.tolist())
+    if not counts:
+        return None, [], True
+    modal, modal_n = counts.most_common(1)[0]
+    rare = sorted(lvl for lvl, c in counts.items() if c < threshold and lvl != modal)
+    if not rare:
+        return (keys, [], False) if len(counts) >= 2 else (None, [], True)
+    if modal_n < threshold or len(counts) - len(rare) < 2:
+        return None, rare, True
+    return np.where(np.isin(keys, rare), modal, keys), rare, False
+
+
+def _is_stratify_spec_list(stratify, X) -> bool:
+    """True when ``stratify`` is a list of variables, not a raw label array.
+
+    A list is read as a spec when at least one element names something
+    stratifiable: the literal ``"event"`` or a column of ``X``. Any other list
+    is one label per sample and keeps the pre-existing array behavior. Wrap it
+    in ``np.asarray(...)`` to force the array reading in the rare case where a
+    label happens to share a column's name.
+
+    An empty list counts as a spec so it reaches the resolver's explanation
+    instead of dying inside sklearn on a zero-length label array.
+    """
+    if not isinstance(stratify, (list, tuple)):
+        return False
+    if len(stratify) == 0:
+        return True
+    return any(
+        isinstance(item, str) and (item == "event" or item in X.columns)
+        for item in stratify
+    )
+
+
+# Depth from a warn() inside _prepare_stratify_column out to the user's setup()
+# call: warn(1) <- _resolve_stratify_item(2) <- _resolve_stratify_components(3)
+# <- _setup_split_data(4) <- _configure_cv(5) <- setup(6) <- caller(7).
+# _resolve_stratify_components walks its entries with a plain loop rather than a
+# comprehension, because a loop always contributes exactly one frame; a
+# comprehension's frame count depends on the Python version. Warnings raised at
+# other depths adjust off this constant rather than hardcoding a number.
+_RESOLVE_STACKLEVEL = 7
+
+
+def _drop_stratify_entry(name, reason, keys_note):
+    """Warn that a named stratify entry was dropped, and why.
+
+    A `MethodologicalWarning`, not a suggestion: the user named this variable
+    to balance on and the split will not balance on it. That is a change to the
+    analysis, not a style note.
+    """
+    warnings.warn(
+        f"stratify entry '{name}' was dropped: {reason}. {keys_note}",
+        MethodologicalWarning,
+        stacklevel=_RESOLVE_STACKLEVEL + 1,  # this helper is one frame deeper
+    )
+
+
+def _prepare_stratify_column(col, name):
+    """Resolve one named ``stratify=`` column to ``(label, values)``.
+
+    A column with more distinct values than ``MAX_STRATIFY_LEVELS`` is not a
+    stratum, it is an identifier: stratifying on it would put roughly one
+    sample per class. Such a column is quantile-binned instead. Every column of
+    ``X`` is numeric by then (``validate_survival_data`` rejects the rest during
+    ``setup``), so binning always has an ordering to work with.
+
+    Returns ``(None, None)`` when the column cannot contribute two distinct
+    groups, which tells the caller to drop the key rather than add a constant
+    one that silently stratifies on nothing.
+    """
+    import pandas as pd
+
+    n_nan = int(col.isna().sum())
+    if n_nan:
+        warnings.warn(
+            f"stratify column '{name}' has {n_nan} missing values. They become "
+            f"their own stratum rather than being dropped, so if that group is "
+            f"small it can itself trigger the rare-combination merge or the "
+            f"fallback below. Fill or drop them first to avoid that.",
+            SuggestionWarning,
+            stacklevel=_RESOLVE_STACKLEVEL,
+        )
+
+    n_unique = col.nunique(dropna=True)
+
+    # Checked before the cardinality branch: a constant (or single-valued)
+    # column is useless at ANY cardinality, and letting it through would
+    # replace real stratification with one all-inclusive class.
+    n_groups = n_unique + (1 if n_nan else 0)
+    if n_groups < 2:
+        _drop_stratify_entry(
+            name,
+            f"it has only {n_groups} distinct value(s), so it cannot separate "
+            f"anything",
+            "Stratification uses the remaining entries.",
+        )
+        return None, None
+
+    if n_unique <= MAX_STRATIFY_LEVELS:
+        return name, np.asarray(col)
+
+    binned, bins = pd.qcut(
+        col, STRATIFY_QUANTILE_BINS, labels=False,
+        duplicates="drop", retbins=True,
+    )
+    n_bins = int(binned.nunique(dropna=True))
+    if n_bins < 2:
+        _drop_stratify_entry(
+            name,
+            f"its {n_unique} values are tied so heavily that quantile binning "
+            f"collapsed to {n_bins} bin(s)",
+            "Stratification uses the remaining entries.",
+        )
+        return None, None
+
+    cuts = ", ".join(f"{c:g}" for c in bins[1:-1])
+    warnings.warn(
+        f"stratify column '{name}' has {n_unique} distinct values, too many to "
+        f"stratify on directly. It was binned into {n_bins} quantile groups "
+        f"(cut points: {cuts}). Bin it yourself and pass the binned column to "
+        f"choose your own grouping.",
+        SuggestionWarning,
+        stacklevel=_RESOLVE_STACKLEVEL,
+    )
+    return f"{name} ({n_bins} quantile bins)", np.asarray(binned)
+
+
+def _resolve_stratify_item(item, X, y):
+    """Resolve one element of a ``stratify=`` list to ``(label, values)``."""
+    if isinstance(item, str):
+        if item == "event":
+            return "event", np.asarray(y["event"])
+        if item not in X.columns:
+            raise ValueError(
+                f"stratify entry '{item}' is not a column of X and is not "
+                f"'event'. Available columns: {list(X.columns)}"
+            )
+        return _prepare_stratify_column(X[item], item)
+
+    values = np.asarray(item)
+    if values.ndim != 1 or len(values) != len(X):
+        raise ValueError(
+            f"stratify array entry has shape {values.shape}, expected a "
+            f"1-D array of length {len(X)} (one label per sample)"
+        )
+    name = getattr(item, "name", None)
+    label = name if isinstance(name, str) and name else _GENERIC_STRATIFY_LABEL
+    return label, values
+
+
+def _resolve_stratify_components(stratify, X, y):
+    """Resolve a ``stratify=`` list to ``[(label, values), ...]``.
+
+    Entries that cannot separate anything are dropped (each one warns for
+    itself). A repeated *named* entry is dropped too: joining a variable with
+    itself adds no groups and would report the structurally empty off-diagonal
+    cells as rare data. Unnamed arrays are never treated as repeats even though
+    they share a label, since two arrays can hold different labels; their labels
+    get numbered apart instead. Raises when nothing usable is left, since
+    silently falling back to no stratification would contradict an explicit
+    request.
+    """
+    components = []
+    named_seen = set()
+    for item in stratify:
+        label, values = _resolve_stratify_item(item, X, y)
+        if values is None:
+            continue
+        if label == _GENERIC_STRATIFY_LABEL:
+            # Distinct arrays share the generic label, so number them rather
+            # than mistaking the second for a duplicate and losing it.
+            taken = sum(
+                1 for lab, _ in components
+                if lab == label or lab.startswith(f"{label} ")
+            )
+            if taken:
+                label = f"{label} {taken + 1}"
+        elif label in named_seen:
+            # Keyed on the resolved name, not on how it was written, so
+            # ['stage', X['stage']] is caught as well as ['stage', 'stage'].
+            warnings.warn(
+                f"stratify entry '{label}' is listed more than once; the "
+                f"duplicate was ignored. Repeating a variable adds no groups.",
+                SuggestionWarning,
+                stacklevel=_RESOLVE_STACKLEVEL - 2,
+            )
+            continue
+        else:
+            named_seen.add(label)
+        components.append((label, values))
+
+    if not components:
+        raise ValueError(
+            f"stratify={stratify!r} resolved to no usable stratification "
+            f"variables. Pass 'event', a column of X with at least two "
+            f"distinct values, or a label array; or pass stratify=None to "
+            f"skip stratification deliberately."
+        )
+    return components
 
 
 class SetupMixin:
@@ -488,7 +766,7 @@ class SetupMixin:
     def setup(
         self: SurvivalLearner,
         test_fraction: float = 0.3,
-        stratify: str | np.ndarray | pd.Series | None = "event",
+        stratify: str | list | np.ndarray | pd.Series | None = "event",
         groups: str | np.ndarray | pd.Series | None = None,
         cv_folds: int | str = 5,
         cv_repeats: int = 1,
@@ -526,8 +804,56 @@ class SetupMixin:
         ----------
         test_fraction : float, default=0.3
             Fraction for test set.
-        stratify : str or array, default='event'
-            Stratification column or array.
+        stratify : str, list, array, or None, default='event'
+            What the train/test split and the CV folds should keep balanced.
+
+            - ``'event'`` (default) balances the event indicator.
+            - A column name balances that column of ``X`` instead.
+            - A **list** balances every entry at once, so
+              ``stratify=['event', 'stage']`` keeps each event x stage
+              combination in proportion. Entries are ``'event'``, column names
+              of ``X``, or label arrays, mixed freely.
+            - An array balances those labels; ``None`` disables stratification.
+
+            The list form adapts to what the data can support, and every
+            adjustment below is announced by a warning rather than applied
+            quietly:
+
+            - A column with more than 20 distinct values is quantile-binned,
+              since stratifying on a near-continuous variable would make one
+              stratum per patient. Bin it yourself first to choose your own
+              grouping.
+            - An entry that cannot separate anything (a constant column, or one
+              whose values are too tied to bin) is dropped. If nothing usable is
+              left, ``setup`` raises rather than silently not stratifying.
+            - With two or more entries, rare combinations collapse into an
+              ``__other__`` bucket, and stratification backs off to the first
+              entry alone if even that bucket is too small. With a single entry
+              rare levels fold into the most common level instead, and if that
+              leaves fewer than two groups the stage is left unstratified.
+            - The split and the folds are checked separately, against different
+              thresholds (2 per cell across the cohort for the split,
+              ``cv_folds`` within the training rows for the folds), so the folds
+              may merge or back off where the split did not.
+            - If the keys outnumber the rows on the smaller side of the split,
+              stratification backs off, because ``train_test_split`` needs room
+              for one member of every group on both sides.
+
+            A repeated column name is ignored (repeating a variable adds no
+            groups) and an empty list raises. A list also takes precedence over
+            ``stratify_subpopulations``: a declared subpopulation is not
+            silently added to the keys.
+
+            ``stratify`` is ignored entirely when the split cannot honour it:
+            with pre-split data, with ``cv_strategy='timeseries'`` (ordered, not
+            shuffled), and for the holdout itself when ``groups`` is given. In
+            the timeseries case the list is not even resolved, so none of the
+            adjustments above apply.
+
+            A tuple works wherever a list does. A plain list of per-sample labels
+            still works as an array, unless one of its entries happens to be
+            ``'event'`` or a column name; pass ``np.asarray(...)`` to force the
+            array reading.
         groups : str or array, optional
             Group labels for GroupKFold.
         cv_folds : int or str, default=5
@@ -804,6 +1130,13 @@ class SetupMixin:
             self._state.subpopulations = None
             self._state.subpopulations_train = None
             self._state.subpopulations_test = None
+            # Stratification labels and the train-sliced components all describe
+            # the old split. Cleared here so a re-setup() that fails part way
+            # through cannot leave the previous run's values (and a components
+            # list of the wrong length) behind.
+            self._state.stratify_spec = "event"
+            self._state.cv_stratify_spec = None
+            self._state.stratify_components = None
             self._state.ph_test_result = None
             self._state.linearity_test_result = None
             self._state.model_recommendations = None
@@ -928,15 +1261,40 @@ class SetupMixin:
         # Phase 2: Slice subpopulations into train/test using split indices
         self._split_subpopulations(config)
 
+        # Resolve the fold count before anything needs the number. Both the
+        # stratification rebuild below and the splitters further down test cells
+        # against it, and with cv_folds='auto' it comes from the training event
+        # count. Resolving twice would repeat this resolver's warning.
+        n_events_train = int(self.y_train['event'].sum())
+        cv_folds = _validate_cv_folds_vs_events(config.cv_folds, n_events_train)
+        self.cv_folds = cv_folds
+
+        # Rebuild the composite keys for CV. The split used threshold=2 on the
+        # full cohort; folds need every cell to survive cv_folds ways of being
+        # split, on the training rows only.
+        cv_label = self._state.stratify_spec  # set by the split methods above
+        if (self._state.stratify_components is not None
+                and config.cv_strategy == 'stratifiedkfold'):
+            self._state.stratify_array, cv_label = self._build_stratify_keys(
+                self._state.stratify_components, threshold=cv_folds,
+                stacklevel=4,
+            )
+
         # Augment stratify_array with subpopulation for CV if requested.
         # Use the train-sliced stratify_array (stored on state after split),
-        # NOT the full-length array returned by _setup_split_data.
+        # NOT the full-length array returned by _setup_split_data. An explicit
+        # stratify= list wins; _setup_split_data already warned about that.
         if (config.stratify_subpopulations
                 and self._state.subpopulations_train
+                and self._state.stratify_components is None
                 and config.cv_strategy == 'stratifiedkfold'):
             train_stratify = self._state.stratify_array
-            augmented = self._augment_stratify_with_subpopulations(
-                train_stratify, config.cv_folds,
+            base_label = (
+                "event" if self._state.presplit
+                else _stratify_display_label(config.stratify)
+            )
+            augmented, cv_label = self._augment_stratify_with_subpopulations(
+                train_stratify, cv_folds, base_label,
             )
             self._state.stratify_array = augmented
             subpop_keys = list(self._state.subpopulations_train.keys())
@@ -951,13 +1309,21 @@ class SetupMixin:
                     stacklevel=3,
                 )
 
+        if config.cv_strategy != 'stratifiedkfold':
+            self._state.cv_stratify_spec = None
+        elif self._state.stratify_array is None:
+            # _get_cv_folds falls back to the event indicator when nothing was
+            # resolved, so the folds are event-stratified even for stratify=None.
+            self._state.cv_stratify_spec = "event"
+        else:
+            self._state.cv_stratify_spec = cv_label
+
         logger.debug(
             "Data split completed: %d train / %d test samples",
             len(self.y_train), len(self.y_test),
         )
 
         # Check Events Per Variable (EPV) for overfitting risk
-        n_events_train = int(self.y_train['event'].sum())
         n_features = self.X_train.shape[1]
         epv = n_events_train / n_features if n_features > 0 else float('inf')
         if epv < 10:
@@ -1015,9 +1381,7 @@ class SetupMixin:
                             )
                             self._state.subpop_test_warned = True
 
-        # Validate and resolve CV folds
-        cv_folds = _validate_cv_folds_vs_events(config.cv_folds, n_events_train)
-        self.cv_folds = cv_folds
+        # cv_folds was resolved above, before the stratification rebuild needed it.
 
         # Effective repeats: GroupKFold/TimeSeriesSplit force cv_repeats=1
         cv_repeats = _resolve_cv_repeats(config.cv_strategy, config.cv_repeats)
@@ -1066,7 +1430,9 @@ class SetupMixin:
         self._state.categorical_groups = config.categorical_groups
         self._state.categorical_features = config.categorical_features
         self._state.stratify_subpopulations = config.stratify_subpopulations
-        self._state.stratify_spec = _stratify_display_label(config.stratify)
+        # stratify_spec is NOT set here. The split methods record it, because
+        # only they know what actually happened: pre-split forces event, and
+        # the list form may have binned a column or backed out of a rare cell.
         self._state.check_leakage = config.check_leakage
         self._state.ph_test_enabled = config.ph_test
         self._state.linearity_test_enabled = config.linearity_test
@@ -1155,7 +1521,10 @@ class SetupMixin:
             )
         if not (isinstance(stratify, str) and stratify == "event"):
             warnings.warn(
-                f"stratify={stratify!r} ignored when using pre-split data.",
+                f"stratify={stratify!r} ignored when using pre-split data: "
+                f"there is no split for mlsurv to make. The CV folds stratify "
+                f"on the event indicator instead. Pass unsplit X and y if you "
+                f"want the requested stratification applied.",
                 SuggestionWarning,
                 stacklevel=4,
             )
@@ -1170,6 +1539,10 @@ class SetupMixin:
 
         stratify_array = self.y_train['event']
         self._state.stratify_array = stratify_array
+        # Pre-split always stratifies on the event indicator, whatever was
+        # asked for, so the recorded label has to say "event" too.
+        self._state.stratify_spec = "event"
+        self._state.stratify_components = None
 
         self._state.groups = self.X_train[groups] if isinstance(groups, str) else groups
         return stratify_array
@@ -1220,22 +1593,51 @@ class SetupMixin:
         array-like or None
             Stratification array for CV.
         """
-        stratify_array = self._resolve_stratify_array(stratify, self.X, self.y)
+        self._state.stratify_components = None
+        components = None
+        is_spec_list = _is_stratify_spec_list(stratify, self.X)
+
+        if is_spec_list and cv_strategy == 'timeseries':
+            # A temporal split is ordered and its folds forward-chain, so
+            # nothing here is ever stratified. Resolving the spec would only
+            # warn about binning and rare cells for work that never happens.
+            stratify_array = None
+            self._state.stratify_spec = "none"
+        elif is_spec_list:
+            components = _resolve_stratify_components(stratify, self.X, self.y)
+            self._state.stratify_components = components
+            stratify_array, split_label = self._build_stratify_keys(
+                components, threshold=2, stacklevel=5,
+            )
+            # Recorded here, not in _finalize_setup, so the label reflects any
+            # binning or rare-cell fallback that just happened, not the raw spec.
+            self._state.stratify_spec = split_label
+        else:
+            stratify_array = self._resolve_stratify_array(stratify, self.X, self.y)
+            self._state.stratify_spec = _stratify_display_label(stratify)
         self._state.stratify_array = stratify_array
 
         groups_full = self._resolve_groups(groups, self.X)
 
         # Augment stratify_array with subpopulation labels for train_test_split
-        # when stratify_subpopulations=True and subpopulations are validated
+        # when stratify_subpopulations=True and subpopulations are validated.
+        # An explicit stratify= list already says what the folds should balance
+        # on, so it wins over the implicit subpopulation augmentation.
         split_stratify = stratify_array
         if (config is not None
                 and config.stratify_subpopulations
                 and self._state.subpopulations is not None
                 and split_stratify is not None
                 and cv_strategy != 'timeseries'):
-            split_stratify = self._augment_stratify_for_split(
-                split_stratify, self._state.subpopulations,
-            )
+            if components is not None:
+                self._warn_stratify_list_wins(stratify)
+            else:
+                split_stratify, self._state.stratify_spec = (
+                    self._augment_stratify_for_split(
+                        split_stratify, self._state.subpopulations,
+                        self._state.stratify_spec,
+                    )
+                )
 
         # Train-test split. A group-aware holdout keeps whole groups together
         # when groups are supplied, so no subject straddles the train/test
@@ -1249,6 +1651,26 @@ class SetupMixin:
         # Assign definitively (not just on the True branch) so a re-setup()
         # without groups clears a stale flag from a previous group-aware split.
         self._state.group_aware_holdout = train_pos is not None
+
+        # Composite keys can outnumber the rows on one side of the split, which
+        # train_test_split rejects outright. Back off here, where the cause can
+        # be named. Only the list form is guarded: the scalar and array forms
+        # keep their existing behavior byte for byte.
+        #
+        # This has to run AFTER the holdout above, not before it. Supplying
+        # `groups` does not guarantee a group-aware split: _group_aware_holdout
+        # declines when there are fewer than two distinct groups, and the code
+        # then falls through to a real stratified train_test_split. Gating on the
+        # intent rather than the outcome skipped the guard in exactly that case,
+        # letting the opaque sklearn error back through.
+        if (components is not None and split_stratify is not None
+                and train_pos is None and cv_strategy != 'timeseries'):
+            split_stratify, self._state.stratify_spec = (
+                self._guard_stratify_class_count(
+                    split_stratify, components, test_fraction,
+                    self._state.stratify_spec,
+                )
+            )
 
         if train_pos is not None:
             self.X_train = self.X.iloc[train_pos]
@@ -1309,6 +1731,12 @@ class SetupMixin:
 
         if stratify_array is not None:
             self._state.stratify_array = np.asarray(stratify_array)[train_positions]
+
+        if self._state.stratify_components is not None:
+            self._state.stratify_components = [
+                (label, np.asarray(values)[train_positions])
+                for label, values in self._state.stratify_components
+            ]
 
         return stratify_array
 
@@ -1522,12 +1950,202 @@ class SetupMixin:
             }
 
     @staticmethod
-    def _augment_stratify_for_split(stratify_array, subpopulations):
+    def _build_stratify_keys(components, threshold, stacklevel):
+        """Build composite stratification keys from resolved list components.
+
+        The first component is the base axis and is kept intact; the rest are
+        joined into one level axis so a rare *combination* collapses into
+        ``__other__`` together. With a single component there is nothing to
+        collapse, so its values are used as-is.
+
+        Falls back to the base component alone (with a warning) when even the
+        merged bucket cannot reach *threshold*, mirroring the subpopulation
+        augmentation. With a single component there is no base to fall back to,
+        so that case returns ``(None, "none")``, an unstratified stage.
+
+        *stacklevel* is passed in because this runs at two different depths
+        (from the split and again from the CV rebuild), and one constant would
+        misattribute the warning from one of them.
+
+        Returns
+        -------
+        (ndarray, str)
+            The keys, and a display label naming what they actually stratify
+            on (the base component alone after a fallback), and marked
+            ``(rare levels merged)`` when a bucket was collapsed. Callers store
+            that label, so a merge at one stage and not the other stays visible
+            in the report instead of looking identical.
+        """
+        labels = [label for label, _ in components]
+        arrays = [values for _, values in components]
+
+        # One variable has no base axis to hold fixed, so rare levels fold into
+        # the modal level instead of an __other__ bucket. Either way the values
+        # go through _as_key_strings first, which is what puts every NaN in one
+        # "nan" group, the promise made when the column was resolved. Returning
+        # the raw array here (as an earlier version did) broke that, and NaN then
+        # reached sklearn and crashed it.
+        single = len(arrays) == 1
+        if single:
+            cell = rest = labels[0]
+            level_labels = _as_key_strings(arrays[0])
+            combined, merged_levels, fully_failed = _merge_rare_into_modal(
+                arrays[0], threshold,
+            )
+            bucket, other = f"the most common '{labels[0]}' group", ""
+        else:
+            rest = " × ".join(labels[1:])
+            cell = f"{labels[0]} × {rest}"
+            level_labels = _join_stratify_keys(arrays[1:])
+            combined, merged_levels, fully_failed = _collapse_rare_levels(
+                arrays[0], level_labels, threshold=threshold,
+            )
+            bucket, other = "'__other__'", " Other combinations stratify normally."
+
+        if fully_failed:
+            detail = (
+                f"merging rare levels {sorted(merged_levels, key=str)} into {bucket}"
+                if merged_levels
+                else "no levels could be merged"
+            )
+            # The base is NOT safe to return as-is. It has never been checked
+            # against the threshold, so a singleton level in it walks straight
+            # into sklearn's "least populated class has only 1 member" — the
+            # opaque failure this whole fallback exists to prevent. Fold its own
+            # rare levels first, and give up honestly if that cannot work.
+            base_keys, base_merged, base_failed = (
+                (None, [], True) if single
+                else _merge_rare_into_modal(arrays[0], threshold)
+            )
+            fallback = (
+                "Stratification is disabled for this stage."
+                if base_failed
+                else f"Falling back to stratifying on '{labels[0]}' alone."
+            )
+            if base_merged:
+                fallback += (
+                    f" Rare '{labels[0]}' levels "
+                    f"{sorted(base_merged, key=str)} were folded into its most "
+                    f"common level to make that possible."
+                )
+            warnings.warn(
+                f"Fewer than two usable ({cell}) groups of at least {threshold} "
+                f"samples remained after {detail}. {fallback}",
+                MethodologicalWarning,
+                stacklevel=stacklevel,
+            )
+            if base_failed:
+                return None, "none"
+            return base_keys, labels[0]
+        if merged_levels:
+            # Every level merging is not a partial merge, it is a total one: the
+            # keys collapse back to the base component, so the extra variables
+            # contributed nothing. Saying "rare levels merged" there would claim
+            # a finer stratification than actually happened. This cannot arise
+            # with a single component, where the modal level is never merged.
+            all_merged = not single and (
+                len(set(merged_levels)) >= len(set(level_labels.tolist()))
+            )
+            if all_merged:
+                warnings.warn(
+                    f"Every level of ({rest}) had < {threshold} samples in some "
+                    f"({cell}) cell, so they were merged into one bucket and "
+                    f"({rest}) no longer separates anything. The keys are "
+                    f"'{labels[0]}' alone.",
+                    SuggestionWarning,
+                    stacklevel=stacklevel,
+                )
+                return combined, labels[0]
+            warnings.warn(
+                f"Levels {sorted(merged_levels, key=str)} of ({rest}) had "
+                f"< {threshold} samples in some ({cell}) cell; merged into "
+                f"{bucket}.{other}",
+                SuggestionWarning,
+                stacklevel=stacklevel,
+            )
+            return combined, " × ".join(labels) + " (rare levels merged)"
+        return combined, " × ".join(labels)
+
+    def _guard_stratify_class_count(self: SurvivalLearner, keys, components,
+                                    test_fraction, label):
+        """Back off when the keys outnumber the rows on one side of the split.
+
+        ``train_test_split`` needs room for at least one member of every class
+        on both sides, and raises a message that names neither mlsurv nor
+        ``stratify=`` when it does not get it. Reducing to the first component
+        here (and to nothing if even that is too fine) turns that into a warning
+        that explains the cause and the remedy.
+        """
+        import math
+
+        n = len(self.X)
+        n_test = math.ceil(n * test_fraction)
+        capacity = min(n_test, n - n_test)
+        n_classes = len(np.unique(np.asarray(keys)))
+        if n_classes <= capacity:
+            return keys, label
+
+        base_label, base_values = components[0]
+        # Fold the base's own rare levels before falling back to it: sklearn
+        # needs at least 2 members per class as well as room for every class,
+        # and the base has not been checked against either.
+        base_keys, _, base_failed = _merge_rare_into_modal(base_values, 2)
+        remedy = (
+            "Use fewer variables, coarser levels, or a larger test_fraction to "
+            "keep the full stratification."
+        )
+        if not base_failed and len(np.unique(base_keys)) <= capacity:
+            warnings.warn(
+                f"Stratifying on {label} needs {n_classes} groups, but the "
+                f"smaller side of the split holds only {capacity} rows, so not "
+                f"every group can appear on both sides. Falling back to "
+                f"'{base_label}' alone. {remedy}",
+                MethodologicalWarning,
+                stacklevel=5,
+            )
+            return base_keys, base_label
+        warnings.warn(
+            f"Stratifying on {label} needs {n_classes} groups and even "
+            f"'{base_label}' alone needs more than the {capacity} rows on the "
+            f"smaller side of the split. The train/test split is not "
+            f"stratified. {remedy}",
+            MethodologicalWarning,
+            stacklevel=5,
+        )
+        return None, "none"
+
+    @staticmethod
+    def _warn_stratify_list_wins(stratify):
+        """Explain that an explicit stratify= list beat the subpopulation augment.
+
+        A `SuggestionWarning`'s default "once" filter would normally hide this
+        on a repeated `setup()`, but setup() mutates warning filters in its call
+        chain, which invalidates the per-module registry, so each setup()
+        re-emits. `_setup_split_data` documents the same mechanism for the
+        timeseries warning.
+        """
+        warnings.warn(
+            f"stratify={list(stratify)!r} names the stratification variables "
+            f"explicitly, so declared subpopulations were NOT added to the "
+            f"stratification keys. Add the subpopulation name to stratify= if "
+            f"you want the split and folds balanced on it too.",
+            SuggestionWarning,
+            stacklevel=5,
+        )
+
+    @staticmethod
+    def _augment_stratify_for_split(stratify_array, subpopulations, base_label):
         """Combine event stratification with subpopulation labels for train_test_split.
 
         Collapses rare levels (any (event x level) cell with < 2 samples) into
         an `__other__` bucket; falls back to event-only only if the collapsed
         bucket itself fails the threshold.
+
+        Returns
+        -------
+        (array-like, str)
+            The split stratification labels, and a display label naming what
+            they actually stratify on: *base_label* alone after a fallback.
         """
         first_key = next(iter(subpopulations))
         sg_labels = np.asarray(subpopulations[first_key])
@@ -1549,7 +2167,7 @@ class SetupMixin:
                 MethodologicalWarning,
                 stacklevel=5,
             )
-            return stratify_array
+            return stratify_array, base_label
         if merged_levels:
             warnings.warn(
                 f"Subpopulation levels {sorted(merged_levels, key=str)} had < 2 samples "
@@ -1559,21 +2177,33 @@ class SetupMixin:
                 SuggestionWarning,
                 stacklevel=5,
             )
-        return combined
+        return combined, f"{base_label} × subpopulation({first_key})"
 
     def _augment_stratify_with_subpopulations(
         self: SurvivalLearner,
         stratify_array,
         cv_folds,
+        base_label,
     ):
         """Combine event stratification with subpopulation labels for CV.
 
         Collapses rare levels (any (event x level) cell with < cv_folds
         samples) into an `__other__` bucket; falls back to event-only only if
         the collapsed bucket itself fails the threshold.
+
+        *base_label* names what the folds stratify on before the subpopulation
+        is folded in. It has to be passed rather than read from
+        ``stratify_spec``, which by this point may already carry the split's
+        own augmentation.
+
+        Returns
+        -------
+        (array-like, str)
+            The CV stratification labels, and a display label naming what they
+            actually stratify on: *base_label* alone after a fallback.
         """
         if stratify_array is None:
-            return None
+            return None, base_label
 
         first_key = next(iter(self._state.subpopulations_train))
         sg_labels = np.asarray(self._state.subpopulations_train[first_key])
@@ -1596,7 +2226,7 @@ class SetupMixin:
                 MethodologicalWarning,
                 stacklevel=4,
             )
-            return stratify_array
+            return stratify_array, base_label
         if merged_levels:
             warnings.warn(
                 f"Subpopulation levels {sorted(merged_levels, key=str)} had < "
@@ -1606,7 +2236,7 @@ class SetupMixin:
                 SuggestionWarning,
                 stacklevel=4,
             )
-        return combined
+        return combined, f"{base_label} × subpopulation({first_key})"
 
     def _check_cv_warnings(self: SurvivalLearner, cv_repeats):
         """Check for conditions where repeated CV might be beneficial.
@@ -2069,7 +2699,7 @@ def _validate_subpopulation_dict(subpopulations, n_samples, param_name):
                 stacklevel=5,
             )
         n_unique = len(set(arr[~nan_mask]))
-        if n_unique > 20:
+        if n_unique > MAX_STRATIFY_LEVELS:
             warnings.warn(
                 f"Subpopulation '{name}' has {n_unique} unique values. "
                 f"Subpopulation analysis is intended for categorical variables "
