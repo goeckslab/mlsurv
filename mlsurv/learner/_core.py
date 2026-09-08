@@ -17,8 +17,17 @@ from ..models import (
 )
 from ..constants import CORRELATION_THRESHOLD, DEFAULT_SCORING_METRIC
 from ..logging_utils import get_logger
-from .._warnings import InternalWarning, SuggestionWarning
-from ..utils import validate_survival_data, adjust_model_njobs
+from .._warnings import (
+    InternalWarning,
+    MethodologicalWarning,
+    SuggestionWarning,
+)
+from ..utils import (
+    adjust_model_njobs,
+    empty_feature_columns,
+    format_column_list,
+    validate_survival_data,
+)
 from ..results.containers import ModelResult
 
 logger = get_logger("learner")
@@ -80,6 +89,136 @@ DEEP_LEARNING_MODELS = get_deep_learning_models()
 
 # Backward compatibility alias for _adjust_model_njobs
 _adjust_model_njobs = adjust_model_njobs
+
+
+def _resolve_transformed_columns(fitted, X_in, transformed):
+    """Return column labels for *transformed*, one per column of data.
+
+    A transformer that learned real names is asked first. Matching the
+    input width does not prove the columns still mean the same things: one
+    that drops two columns and appends two indicators, or that reorders,
+    comes back the same width carrying different features, and labelling it
+    from the input would silently attach every result to the wrong feature
+    name. Asking is also what sklearn does under
+    ``set_output(transform="pandas")``, which is how the model pipeline
+    labels this very same data.
+
+    "Learned real names" is the catch. sklearn records
+    ``feature_names_in_`` only when every input label is a string, so a
+    frame with integer column labels is named ``x0, x1, ...`` positionally
+    (checked against sklearn 1.8). Accepting those would be its own silent
+    mislabel, so the caller's own labels win while the width still lines
+    up, and the positional names are a last resort for a width that
+    changed.
+
+    Widths differ in both directions: every imputer drops columns with no
+    observed value, and ``SimpleImputer(add_indicator=True)`` appends a
+    missingness flag per column. Labelling regardless of that is what made
+    a 100%-missing feature raise a bare pandas "Shape of passed values"
+    error.
+    """
+    n_out = transformed.shape[1]
+    names, failure = _feature_names_out(fitted, n_out)
+    learned_names = getattr(fitted, 'feature_names_in_', None) is not None
+
+    if names is not None and learned_names:
+        return names
+    if n_out == X_in.shape[1]:
+        if failure is not None:
+            # The width lining up is not evidence the columns still mean the
+            # same things, and here we know the transformer was asked and
+            # could not answer. Falling back silently is what would attach
+            # every PH p-value, martingale plot and importance row to the
+            # wrong feature with nothing anywhere saying so.
+            warnings.warn(
+                f"could not read the imputer's own column names ({failure}); "
+                f"labelling its {n_out} output columns from the input "
+                "instead. If the transformer reorders, drops, or replaces "
+                "columns, every diagnostic below is attached to the wrong "
+                "feature name.",
+                MethodologicalWarning,
+                stacklevel=4,
+            )
+        return X_in.columns
+    if names is not None:
+        return names
+
+    detail = failure or (
+        f"{type(fitted).__name__} has no get_feature_names_out()"
+    )
+    raise ValueError(
+        f"the imputer ({type(fitted).__name__}) returned {n_out} columns for "
+        f"{X_in.shape[1]} input features, and its column names could not be "
+        f"read ({detail}), so the result cannot be labelled. Use an imputer "
+        "whose get_feature_names_out() works, or drop the all-missing "
+        "columns from X yourself."
+    )
+
+
+def _validate_frame_output(fitted, X_in, transformed):
+    """Check a transformer's own DataFrame before handing it on.
+
+    A transformer that labels its own output has already answered the
+    naming question, but not the alignment one. Callers pair this frame
+    with ``y_train`` row by row, so a transformer that returns a fresh
+    ``RangeIndex`` would carry labels that no longer match the rows.
+    sklearn's own ``set_output`` wrapper reindexes to the input, so this
+    guards third-party transformers rather than sklearn ones.
+    """
+    if len(transformed) != len(X_in):
+        raise ValueError(
+            f"the imputer ({type(fitted).__name__}) returned "
+            f"{len(transformed)} rows for {len(X_in)} input rows, so the "
+            "result cannot be aligned with the survival outcomes"
+        )
+
+    if not transformed.index.equals(X_in.index):
+        # Assumes row order is preserved, which nothing here can check: the
+        # count guard above rules out dropped rows, not reordered ones. An
+        # imputer that permutes rows is not a thing sklearn does, and a
+        # frame carrying a regenerated index gives us nothing to detect it
+        # with either way.
+        transformed = transformed.set_axis(X_in.index)
+
+    if transformed.isna().any().any():
+        warnings.warn(
+            f"the imputer ({type(fitted).__name__}) left missing values in "
+            "its output. Diagnostics computed from it drop every row that "
+            "still has one, which can be most of the data.",
+            MethodologicalWarning,
+            stacklevel=4,
+        )
+    return transformed
+
+
+def _feature_names_out(fitted, n_out):
+    """Ask *fitted* to name its ``n_out`` output columns.
+
+    Returns ``(names, None)`` when it can, or ``(None, reason)`` when it
+    cannot, so the caller can put the real reason in front of the user
+    instead of a generic one. Three things go wrong here and they need
+    telling apart: the method is absent, it raised, or it answered with the
+    wrong number of names.
+    """
+    getter = getattr(fitted, 'get_feature_names_out', None)
+    if getter is None:
+        return None, None
+
+    try:
+        names = list(getter())
+    except (AttributeError, TypeError, ValueError, KeyError, IndexError,
+            NotImplementedError, RuntimeError) as exc:
+        # Caught wider than sklearn's own raises so the reason reaches the
+        # message the user reads. The caller logs every escape under
+        # "Imputation failed", which would point at the wrong step: the
+        # imputation succeeded and only the labelling of it did not.
+        return None, (f"{type(fitted).__name__}.get_feature_names_out() "
+                      f"raised {type(exc).__name__}: {exc}")
+
+    if len(names) != n_out:
+        return None, (f"{type(fitted).__name__}.get_feature_names_out() "
+                      f"returned {len(names)} names for {n_out} columns")
+    return names, None
 
 
 class SurvivalLearner(
@@ -301,8 +440,11 @@ class SurvivalLearner(
         """
         # Validate each dataset (skip size/event checks on test set — it's
         # legitimately smaller than the training set after splitting)
-        validate_survival_data(X_train, y_train)
-        validate_survival_data(X_test, y_test, min_samples=0, min_events=0)
+        validate_survival_data(X_train, y_train, label="X_train")
+        validate_survival_data(
+            X_test, y_test, min_samples=0, min_events=0,
+            label="X_test", fit_cohort=False,
+        )
 
         # Check feature compatibility
         train_cols = set(X_train.columns)
@@ -950,9 +1092,17 @@ class SurvivalLearner(
     def _get_imputed_X(self, X, *, raise_on_error: bool = False):
         """Return *X* with NaN imputed using the configured imputer.
 
-        Clones and fits ``self._state.imputer`` on *X*.  If no imputer is
-        configured or *X* has no NaN, returns *X* unchanged.  Falls back to
-        median imputation when no imputer is available.
+        Clones and fits ``self._state.imputer`` on *X*.  If *X* has no NaN,
+        returns it unchanged.  Falls back to median imputation when no
+        imputer is configured.
+
+        Columns with no observed value are dropped before fitting, because
+        an imputer drops them anyway (by default: sklearn's
+        ``keep_empty_features=True`` would keep them, and this drop
+        overrides it) and the returned frame has to carry one name per
+        column of data.  So the result can be *narrower* than *X*, and a
+        widening imputer (e.g. ``SimpleImputer(add_indicator=True)``) makes
+        it wider.
 
         Parameters
         ----------
@@ -961,25 +1111,58 @@ class SurvivalLearner(
         raise_on_error : bool, default=False
             If True, re-raise imputation exceptions after logging so the
             caller can handle them (e.g. ``ph_test()``).  If False
-            (default), return *X* unchanged on failure.
+            (default), return *X* unchanged on failure.  An *X* whose every
+            column is empty raises either way, since there is no usable
+            frame to fall back to.
         """
         if X is None or not X.isna().any().any():
             return X
+
+        # Outside the try on purpose. A matrix whose every column is empty is
+        # a broken input, not a failed imputation, and the fallback the
+        # `except` offers (hand back the raw frame) is guaranteed useless
+        # here: it is all NaN, so complete-case analysis downstream drops
+        # every row. Raising unconditionally is the only honest answer, so
+        # `raise_on_error` does not apply.
+        if len(empty_feature_columns(X)) == X.shape[1]:
+            raise ValueError(
+                f"every one of the {X.shape[1]} feature columns in X is "
+                "entirely missing, so there is nothing to impute and no "
+                "diagnostic can be computed from it. Check that the feature "
+                "columns were loaded as intended."
+            )
+
+        # Outside the try so the frame the fallback returns is the same one
+        # the warning below describes. Inside it, a later failure handed back
+        # the original X with its all-NaN columns still on it, contradicting
+        # the warning and costing every row to complete-case analysis.
+        X_fit = self._drop_empty_columns(X)
+
+        # Dropping the empty columns can leave nothing left to impute, in
+        # which case no imputer needs fitting.
+        if not X_fit.isna().any().any():
+            return X_fit
 
         try:
             imputer = self._state.imputer
             if imputer is not None:
                 from sklearn.base import clone
-                fitted = clone(imputer).fit(X)
+                fitted = clone(imputer).fit(X_fit)
             else:
                 from sklearn.impute import SimpleImputer
                 logger.warning(
                     "No imputer configured; falling back to median for diagnostics"
                 )
-                fitted = SimpleImputer(strategy="median").fit(X)
+                fitted = SimpleImputer(strategy="median").fit(X_fit)
+
+            transformed = fitted.transform(X_fit)
+            if isinstance(transformed, pd.DataFrame):
+                return _validate_frame_output(fitted, X_fit, transformed)
 
             return pd.DataFrame(
-                fitted.transform(X), columns=X.columns, index=X.index,
+                transformed,
+                columns=_resolve_transformed_columns(fitted, X_fit, transformed),
+                index=X_fit.index,
             )
         except (MemoryError, RecursionError):
             raise
@@ -988,8 +1171,39 @@ class SurvivalLearner(
             if raise_on_error:
                 logger.warning("Imputation failed (%s); re-raising", exc)
                 raise
-            logger.warning("Imputation failed (%s); proceeding with raw data", exc)
+            logger.warning(
+                "Imputation failed (%s); proceeding with unimputed data", exc
+            )
+            return X_fit
+
+    def _drop_empty_columns(self, X):
+        """Return *X* without its all-NaN columns, warning when any go.
+
+        ``MethodologicalWarning``, not ``SuggestionWarning``: the returned
+        matrix, and every diagnostic computed from it, then describes a
+        narrower feature set than the ``X_train`` the user passed in, and
+        nothing in the resulting tables says so. It is also the only notice
+        for a column that is empty in the training split but not in the
+        full ``X`` the setup-time check saw.
+        """
+        empty_cols = empty_feature_columns(X)
+        if not empty_cols:
             return X
+
+        n = len(empty_cols)
+        kept = X.shape[1] - n
+        warnings.warn(
+            f"{n} feature{'s' if n > 1 else ''} with no observed values "
+            f"({format_column_list(empty_cols)}) cannot be imputed and "
+            f"{'are' if n > 1 else 'is'} excluded from the imputed matrix, "
+            f"so any diagnostic computed from it covers {kept} "
+            f"feature{'s' if kept != 1 else ''}, not {X.shape[1]}.",
+            MethodologicalWarning,
+            # 4, matching _validate_frame_output: helper -> _get_imputed_X ->
+            # the public method the user called -> the user's own frame.
+            stacklevel=4,
+        )
+        return X.drop(columns=empty_cols)
 
     def _warn_if_overwriting(self, attr_name: str, result_type: str) -> None:
         """Warn if an existing result will be overwritten."""

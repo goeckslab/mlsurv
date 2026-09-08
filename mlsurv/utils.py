@@ -1270,6 +1270,8 @@ def validate_survival_data(
     warn_missing: bool = True,
     min_events: int = 5,
     min_samples: int = 10,
+    label: str = "X",
+    fit_cohort: bool = True,
 ) -> None:
     """
     Validate survival data inputs.
@@ -1281,11 +1283,20 @@ def validate_survival_data(
     y : SurvivalArray
         Survival outcomes with 'event' and 'time' fields.
     warn_missing : bool, default=True
-        If True, emit a warning when X contains missing values.
+        If True, emit a warning when X contains missing values. Features with
+        *no* observed value are warned about either way — see
+        :func:`empty_feature_columns`.
     min_events : int, default=5
         Minimum number of uncensored events required. Set to 0 to skip.
     min_samples : int, default=10
         Minimum number of samples required. Set to 0 to skip.
+    label : str, default="X"
+        Name of the frame being checked, used in messages so a caller that
+        validates a split can say which one ("X_train", "X_test").
+    fit_cohort : bool, default=True
+        Whether *X* is the data models are fit on. A held-out cohort is not,
+        so an empty column there means something different: its values come
+        from the training fit rather than being dropped.
 
     Raises
     ------
@@ -1337,12 +1348,42 @@ def validate_survival_data(
     # Check for non-numeric columns
     non_numeric = X.select_dtypes(include=['object', 'category', 'string']).columns.tolist()
     if non_numeric:
-        shown = non_numeric[:5]
-        extra = f" (and {len(non_numeric) - 5} more)" if len(non_numeric) > 5 else ""
         raise ValueError(
-            f"X contains non-numeric columns: {shown}{extra}. "
+            f"X contains non-numeric columns: {format_column_list(non_numeric)}. "
             "Encode categorical columns before passing to mlsurv "
             "(e.g., pd.get_dummies() or sklearn LabelEncoder)."
+        )
+
+    # Check for features with no observed value. Deliberately not gated on
+    # warn_missing (which setup() sets to `imputer is None`): a configured
+    # imputer is exactly the case where such a column disappears silently,
+    # since imputation has nothing to fill it from.
+    empty_cols = empty_feature_columns(X)
+    if empty_cols:
+        n = len(empty_cols)
+        # The "dropped" half is true only with an imputer configured, which
+        # is the default but not required: setup(imputer=None) leaves the
+        # NaN in place and the model fit fails instead. Nothing is learned
+        # from the feature either way, so lead with that.
+        consequence = (
+            "nothing can be learned from them: an imputer drops them before "
+            "model fitting, and they are excluded from the assumption "
+            "diagnostics. They still appear in the importance table, with "
+            "zero permutation importance and no coefficient, which is not "
+            "the same as a feature that was measured and found unimportant"
+            if fit_cohort else
+            "their values here come entirely from the fit on the training "
+            "data, not from this cohort"
+        )
+        warnings.warn(
+            f"{n} feature{'s' if n > 1 else ''} in {label} "
+            f"ha{'ve' if n > 1 else 's'} no observed values (100% missing): "
+            f"{format_column_list(empty_cols)}. Imputation cannot fill them, "
+            f"so {consequence}. Drop them, or supply data for them.",
+            MethodologicalWarning,
+            # stacklevel=2 attributes the warning to whoever called this
+            # public validator (setup(), or user code calling it directly).
+            stacklevel=2,
         )
 
     # Check for missing values in X
@@ -1366,6 +1407,39 @@ def validate_survival_data(
         )
 
 
+def empty_feature_columns(X: pd.DataFrame) -> list:
+    """Return the names of columns in *X* that hold no observed value.
+
+    A column that is 100% NaN carries no information and cannot be imputed:
+    every sklearn imputer drops it at ``fit`` time ("Skipping features
+    without any observed values"), so the models and the assumption
+    diagnostics run without it.  It still occupies a row in the importance
+    table, scoring zero permutation importance with a NaN coefficient.
+    Callers use this to say so rather than to discover it from a shape
+    mismatch.
+
+    Returns an empty list when *X* is None or has no columns.
+    """
+    # A zero-row frame reports every column as all-NaN (``all()`` over
+    # nothing is True), which is 'no rows', not 'no observed values'.
+    if X is None or X.shape[1] == 0 or len(X) == 0:
+        return []
+    return X.columns[X.isna().all(axis=0)].tolist()
+
+
+def format_column_list(columns, limit: int = 5) -> str:
+    """Render *columns* for a message, naming at most *limit* of them.
+
+    Matches the ``[a, b, c] (and N more)`` shape already used for the
+    non-numeric-column error in :func:`validate_survival_data`. Accepts any
+    iterable: it is materialised once, so passing a generator does not
+    leave the count reading an exhausted one.
+    """
+    cols = list(columns)
+    extra = f" (and {len(cols) - limit} more)" if len(cols) > limit else ""
+    return f"{cols[:limit]}{extra}"
+
+
 def drop_nan_rows(
     df: pd.DataFrame,
     y: np.ndarray,
@@ -1374,8 +1448,10 @@ def drop_nan_rows(
     """Drop rows where any feature column in *df* contains NaN.
 
     Performs complete-case analysis: both *df* and *y* are filtered in
-    lockstep so they remain aligned.  Always emits a warning when rows
-    are dropped so users are aware of data loss at any log level.
+    lockstep so they remain aligned.  Logs whenever rows are dropped.  Note
+    that this is a ``logger`` call, not ``warnings.warn``, so it does not
+    reach a user who has not configured logging; callers that can lose most
+    of the data should say so themselves.
 
     Parameters
     ----------

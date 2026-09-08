@@ -1008,3 +1008,131 @@ class TestHandBuiltYViaSetup:
         })
         with pytest.raises(ValueError, match="time=0"):
             SurvivalLearner(X, y).setup(verbose=False)
+
+
+# ---------------------------------------------------------------------------
+# Features with no observed value
+# ---------------------------------------------------------------------------
+class TestEmptyFeatureColumns:
+    """A 100%-missing feature is named, because nothing downstream uses it."""
+
+    @staticmethod
+    def _data(empty_names=("dz_stage",)):
+        n = 30
+        events = np.zeros(n, dtype=bool)
+        events[:15] = True
+        y = _build_y(events, np.arange(1.0, n + 1.0))
+        X = pd.DataFrame({
+            'age': np.linspace(40.0, 80.0, n),
+            'marker': np.linspace(0.0, 1.0, n),
+        })
+        for name in empty_names:
+            X[name] = np.nan
+        return X, y
+
+    def test_warns_naming_the_feature(self):
+        from mlsurv._warnings import MethodologicalWarning
+        from mlsurv.utils import validate_survival_data
+
+        X, y = self._data()
+        with pytest.warns(MethodologicalWarning, match="dz_stage"):
+            validate_survival_data(X, y)
+
+    def test_warns_even_when_missing_warnings_are_off(self):
+        """setup() passes warn_missing=False whenever an imputer is configured —
+        which is exactly when the column vanishes without a trace."""
+        from mlsurv._warnings import MethodologicalWarning
+        from mlsurv.utils import validate_survival_data
+
+        X, y = self._data()
+        with pytest.warns(MethodologicalWarning, match="no observed values"):
+            validate_survival_data(X, y, warn_missing=False)
+
+    def test_names_at_most_five(self):
+        from mlsurv._warnings import MethodologicalWarning
+        from mlsurv.utils import validate_survival_data
+
+        X, y = self._data(tuple(f"empty_{i}" for i in range(7)))
+        with pytest.warns(MethodologicalWarning, match=r"and 2 more") as rec:
+            validate_survival_data(X, y)
+        assert "7 features" in str(rec[0].message)
+
+    def test_silent_when_every_feature_has_data(self):
+        import warnings as _warnings
+
+        from mlsurv._warnings import MethodologicalWarning
+        from mlsurv.utils import validate_survival_data
+
+        X, y = self._data(empty_names=())
+        X.loc[X.index[:5], 'age'] = np.nan  # partly missing is not empty
+        with _warnings.catch_warnings(record=True) as w:
+            _warnings.simplefilter("always")
+            validate_survival_data(X, y)
+        assert not [x for x in w
+                    if issubclass(x.category, MethodologicalWarning)
+                    and "no observed values" in str(x.message)]
+
+    def test_warning_points_at_the_caller(self):
+        """stacklevel must resolve to this test file, not utils.py."""
+        import warnings as _warnings
+
+        from mlsurv._warnings import MethodologicalWarning
+        from mlsurv.utils import validate_survival_data
+
+        X, y = self._data()
+        with _warnings.catch_warnings(record=True) as w:
+            _warnings.simplefilter("always")
+            validate_survival_data(X, y)
+        empty = [x for x in w
+                 if issubclass(x.category, MethodologicalWarning)
+                 and "no observed values" in str(x.message)]
+        assert len(empty) == 1
+        assert empty[0].filename.endswith("test_friendly_errors.py")
+
+    def test_empty_feature_columns_helper(self):
+        from mlsurv.utils import empty_feature_columns
+
+        X, _ = self._data()
+        assert empty_feature_columns(X) == ['dz_stage']
+        assert empty_feature_columns(None) == []
+        assert empty_feature_columns(pd.DataFrame(index=range(3))) == []
+
+    def test_test_split_gets_its_own_wording(self):
+        """A held-out cohort is not the fitting cohort, so the training-only
+        consequence would be false there."""
+        from mlsurv._warnings import MethodologicalWarning
+        from mlsurv.utils import validate_survival_data
+
+        X, y = self._data()
+        with pytest.warns(MethodologicalWarning) as rec:
+            validate_survival_data(
+                X, y, min_samples=0, min_events=0,
+                label="X_test", fit_cohort=False,
+            )
+        msg = str(rec[0].message)
+        assert "X_test" in msg
+        assert "come entirely from the fit on the training data" in msg
+        assert "dropped before model fitting" not in msg
+
+    def test_presplit_setup_labels_each_frame(self):
+        """The presplit path validates both splits; a reader has to be able
+        to tell which one the warning is about."""
+        import warnings as _warnings
+
+        from mlsurv import SurvivalLearner
+        from mlsurv._warnings import MethodologicalWarning
+
+        X, y = self._data()
+        n = len(X)
+        cut = n // 2
+        with _warnings.catch_warnings(record=True) as w:
+            _warnings.simplefilter("always")
+            SurvivalLearner(
+                X_train=X.iloc[:cut], y_train=y[:cut],
+                X_test=X.iloc[cut:], y_test=y[cut:],
+            )
+        msgs = [str(x.message) for x in w
+                if issubclass(x.category, MethodologicalWarning)
+                and "no observed values" in str(x.message)]
+        assert any("X_train" in m for m in msgs)
+        assert any("X_test" in m for m in msgs)

@@ -168,6 +168,10 @@ A low EPV warning is issued when the training set has fewer than 10 events per f
 
 A chi-squared test flags features whose missing-data pattern is statistically associated with the outcome (p < 0.001 AND Cramer's V > 0.3). This can indicate that missingness itself carries prognostic information, which may introduce bias.
 
+### Features With No Observed Values
+
+A feature that is 100% missing cannot be imputed (there is nothing to impute from), so every imputer drops it before fitting. `setup()` emits a `MethodologicalWarning` naming such features, because the models and the PH and linearity diagnostics all run without them, and the reported feature count would otherwise overstate what was actually used. Such a feature does still occupy a row in the importance table, scoring zero permutation importance with a NaN coefficient — indistinguishable, without this warning, from a feature that was measured and found unimportant. The Data Preprocessing report section names them too. Drop them from `X`, or supply data for them.
+
 ### Proportional Hazards Testing
 
 The Grambsch-Therneau test<sup>[3](#references)</sup> evaluates whether each feature satisfies the proportional hazards assumption using Schoenfeld residuals. Results are corrected for multiple comparisons using Benjamini-Hochberg FDR adjustment<sup>[5](#references)</sup>. Violations both emit a `MethodologicalWarning` and feed into the unified [model recommendation table](#model-recommendations), demoting PH-assuming models (CoxPH, CoxNet, GBSA, XGBoost-Cox, DeepSurv, Weibull-AFT) in proportion to the violation rate. The full per-feature DataFrame is available as `learner.ph_test_result` (no recompute; `learner.model_recommendations.ph_test_result` keeps the setup-time snapshot), and `learner.ph_test()` re-runs the test on demand and returns the fresh DataFrame.

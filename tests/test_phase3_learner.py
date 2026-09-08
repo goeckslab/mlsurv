@@ -6,6 +6,7 @@ import warnings
 import pytest
 import numpy as np
 import pandas as pd
+from sklearn.base import BaseEstimator, TransformerMixin
 
 from mlsurv._warnings import (
     MethodologicalWarning,
@@ -15,6 +16,8 @@ from mlsurv._warnings import (
 
 from mlsurv import SurvivalLearner
 from mlsurv.utils import SurvivalArray
+
+from tests._helpers import make_survival_array
 
 
 # ---------------------------------------------------------------------------
@@ -2787,3 +2790,444 @@ class TestGetImputedX:
         with patch("sklearn.base.clone", side_effect=OSError("disk full")):
             with pytest.raises(OSError):
                 learner_with_imputer._get_imputed_X(X_nan, raise_on_error=False)
+
+
+class _WideningUnnamedImputer(BaseEstimator, TransformerMixin):
+    """Doubles the column count and offers no get_feature_names_out."""
+
+    def fit(self, X, y=None):
+        return self
+
+    def transform(self, X):
+        filled = np.asarray(X.fillna(0.0), dtype=float)
+        return np.hstack([filled, filled])
+
+
+class _FrameImputer(BaseEstimator, TransformerMixin):
+    """Labels and indexes its own output, as a pandas-output transformer does."""
+
+    def fit(self, X, y=None):
+        return self
+
+    def transform(self, X):
+        out = X.fillna(0.0)
+        out.columns = [f"{c}_filled" for c in out.columns]
+        return out
+
+
+class _ReindexingFrameImputer(BaseEstimator, TransformerMixin):
+    """Returns a fresh RangeIndex, as many set_output transformers do."""
+
+    def fit(self, X, y=None):
+        return self
+
+    def transform(self, X):
+        return X.fillna(0.0).reset_index(drop=True)
+
+
+class _RowDroppingFrameImputer(BaseEstimator, TransformerMixin):
+    """Returns fewer rows than it was given, so nothing can align it to y."""
+
+    def fit(self, X, y=None):
+        return self
+
+    def transform(self, X):
+        return X.fillna(0.0).iloc[:-1]
+
+
+class _LeakyFrameImputer(BaseEstimator, TransformerMixin):
+    """Claims to impute but leaves NaN behind."""
+
+    def fit(self, X, y=None):
+        return self
+
+    def transform(self, X):
+        return X.copy()
+
+
+class _MiscountingImputer(BaseEstimator, TransformerMixin):
+    """Widens, then names fewer columns than it returned."""
+
+    def fit(self, X, y=None):
+        return self
+
+    def transform(self, X):
+        filled = np.asarray(X.fillna(0.0), dtype=float)
+        return np.hstack([filled, filled])
+
+    def get_feature_names_out(self, input_features=None):
+        return np.array(['only_one'], dtype=object)
+
+
+class _RaisingNamerImputer(BaseEstimator, TransformerMixin):
+    """Imputes fine; its naming method is what breaks."""
+
+    def fit(self, X, y=None):
+        return self
+
+    def transform(self, X):
+        filled = np.asarray(X.fillna(0.0), dtype=float)
+        return np.hstack([filled, filled])
+
+    def get_feature_names_out(self, input_features=None):
+        raise KeyError("stale map")
+
+
+class _RaisingNamerSameWidthImputer(BaseEstimator, TransformerMixin):
+    """Drops 'b', appends a flag, and cannot name the result.
+
+    Net width is unchanged, so the width check alone sees nothing wrong,
+    while every label after the drop belongs to a different column. This is
+    the combination that used to fall through to the input's own labels
+    without a word.
+    """
+
+    def fit(self, X, y=None):
+        self._kept = [c for c in X.columns if c != 'b']
+        self.feature_names_in_ = np.asarray(X.columns, dtype=object)
+        return self
+
+    def transform(self, X):
+        kept = X[self._kept].fillna(0.0)
+        flag = X['b'].isna().astype(float).to_frame('flag_b')
+        return np.hstack([np.asarray(kept), np.asarray(flag)])
+
+    def get_feature_names_out(self, input_features=None):
+        raise KeyError("stale map")
+
+
+class _ExplodingImputer(BaseEstimator, TransformerMixin):
+    """Fits without complaint, then fails at transform time."""
+
+    def fit(self, X, y=None):
+        return self
+
+    def transform(self, X):
+        raise ValueError("transform blew up")
+
+class _RelabellingImputer(BaseEstimator, TransformerMixin):
+    """Same width, different features: drops one column and appends a flag.
+
+    The net width is unchanged, so a width check alone cannot tell that
+    every label after the drop now belongs to a different column.
+    """
+
+    def fit(self, X, y=None):
+        self._kept = [c for c in X.columns if c != 'b']
+        # What sklearn records for itself when fit on a frame whose column
+        # labels are all strings. Setting it is what marks the names from
+        # get_feature_names_out() as learned rather than positional, so a
+        # double that skips it is not the transformer being guarded against.
+        self.feature_names_in_ = np.asarray(X.columns, dtype=object)
+        return self
+
+    def transform(self, X):
+        kept = X[self._kept].fillna(0.0)
+        flag = X['b'].isna().astype(float).to_frame('flag_b')
+        return np.hstack([np.asarray(kept), np.asarray(flag)])
+
+    def get_feature_names_out(self, input_features=None):
+        return np.array(self._kept + ['flag_b'], dtype=object)
+
+
+class TestGetImputedXEmptyColumns:
+    """A feature with no observed value must not derail the imputed matrix.
+
+    Every sklearn imputer drops such a column at fit time, so labelling the
+    output with the input's column names raised a bare pandas "Shape of
+    passed values" error and took the PH / linearity diagnostics, the plots,
+    and the report's Data Preprocessing section down with it.
+    """
+
+    @pytest.fixture
+    def learner(self, small_data):
+        X, y = small_data
+        learner = SurvivalLearner(X, y)
+        learner.setup(random_state=42, cv_folds=3)
+        return learner
+
+    def test_all_nan_column_is_dropped(self, learner):
+        X = pd.DataFrame({
+            'a': [1.0, np.nan, 3.0],
+            'empty': [np.nan] * 3,
+            'b': [4.0, 5.0, 6.0],
+        }, index=[10, 11, 12])
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            result = learner._get_imputed_X(X)
+
+        assert list(result.columns) == ['a', 'b']
+        assert list(result.index) == [10, 11, 12]
+        assert not result.isna().any().any()
+
+    def test_all_nan_column_warns_naming_it(self, learner):
+        X = pd.DataFrame({'a': [1.0, np.nan, 3.0], 'empty': [np.nan] * 3})
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            learner._get_imputed_X(X)
+
+        msgs = [str(x.message) for x in w
+                if issubclass(x.category, MethodologicalWarning)]
+        assert len(msgs) == 1
+        assert "'empty'" in msgs[0]
+        assert "1 feature" in msgs[0]
+        # The narrowed count is the actionable part: 1 of 2 features left.
+        assert "covers 1 feature, not 2" in msgs[0]
+
+    def test_warning_is_methodological_not_a_suggestion(self, learner):
+        """SuggestionWarning fires once per session and is documented as
+        safe to ignore; features vanishing from every diagnostic is not."""
+        X = pd.DataFrame({'a': [1.0, np.nan, 3.0], 'empty': [np.nan] * 3})
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            learner._get_imputed_X(X)
+
+        cats = [x.category for x in w if "no observed values" in str(x.message)]
+        assert cats and all(issubclass(c, MethodologicalWarning) for c in cats)
+        assert not any(issubclass(c, SuggestionWarning) for c in cats)
+
+    def test_empty_column_alone_needs_no_imputer(self, learner):
+        """Dropping the empty column can leave nothing left to impute."""
+        X = pd.DataFrame({'a': [1.0, 2.0, 3.0], 'empty': [np.nan] * 3})
+        learner._state.imputer = None  # would log a median-fallback warning
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            result = learner._get_imputed_X(X)
+
+        assert list(result.columns) == ['a']
+        assert result['a'].tolist() == [1.0, 2.0, 3.0]
+
+    def test_every_column_empty_raises(self, learner):
+        X = pd.DataFrame({'a': [np.nan] * 3, 'b': [np.nan] * 3})
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            with pytest.raises(ValueError, match="entirely missing"):
+                learner._get_imputed_X(X, raise_on_error=True)
+
+    def test_every_column_empty_raises_even_without_raise_on_error(self, learner):
+        """raise_on_error governs imputation failures. An all-missing matrix
+        is a broken input, and the fallback it would take -- return the raw
+        frame -- is all NaN, so complete-case analysis downstream drops every
+        row and reports on nothing."""
+        X = pd.DataFrame({'a': [np.nan] * 3, 'b': [np.nan] * 3})
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            with pytest.raises(ValueError, match="entirely missing"):
+                learner._get_imputed_X(X, raise_on_error=False)
+
+    def test_no_empty_column_does_not_warn(self, learner):
+        """The unaffected path keeps its exact previous behavior."""
+        X = pd.DataFrame({'a': [1.0, np.nan, 3.0], 'b': [4.0, 5.0, np.nan]})
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            result = learner._get_imputed_X(X)
+
+        assert list(result.columns) == ['a', 'b']
+        assert not [x for x in w if "no observed values" in str(x.message)]
+
+
+class TestGetImputedXNamingFailureIsReported:
+    """A naming failure must never be swallowed by a matching width.
+
+    ``_resolve_transformed_columns`` captures *why* naming failed so the
+    reason can reach the user. When the widths happened to line up, that
+    reason was dropped on the floor and the frame was labelled from the
+    input, which is exactly the silent mislabel the function exists to
+    prevent.
+    """
+
+    @pytest.fixture
+    def learner(self, small_data):
+        X, y = small_data
+        learner = SurvivalLearner(X, y)
+        learner.setup(random_state=42, cv_folds=3)
+        return learner
+
+    def test_equal_width_naming_failure_warns(self, learner):
+        learner._state.imputer = _RaisingNamerSameWidthImputer()
+        X = pd.DataFrame({
+            'a': [1.0, 2.0, 3.0],
+            'b': [np.nan, 5.0, 6.0],
+            'c': [7.0, 8.0, 9.0],
+        })
+        with pytest.warns(MethodologicalWarning, match="wrong feature name"):
+            result = learner._get_imputed_X(X)
+        # The fallback still happens; it is now announced rather than silent.
+        assert list(result.columns) == ['a', 'b', 'c']
+
+    def test_warning_names_the_underlying_failure(self, learner):
+        learner._state.imputer = _RaisingNamerSameWidthImputer()
+        X = pd.DataFrame({
+            'a': [1.0, 2.0, 3.0],
+            'b': [np.nan, 5.0, 6.0],
+            'c': [7.0, 8.0, 9.0],
+        })
+        with pytest.warns(MethodologicalWarning, match="raised KeyError"):
+            learner._get_imputed_X(X)
+
+    def test_clean_equal_width_fallback_stays_quiet(self, learner):
+        """No failure to report means no warning: only the real case fires."""
+        X = pd.DataFrame({'a': [1.0, np.nan, 3.0], 'b': [4.0, 5.0, 6.0]})
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            learner._get_imputed_X(X)
+        assert not [w for w in caught
+                    if "wrong feature name" in str(w.message)]
+
+
+class TestGetImputedXFallbackMatchesItsWarning:
+    """The frame handed back must be the one the warning described."""
+
+    @pytest.fixture
+    def learner(self, small_data):
+        X, y = small_data
+        learner = SurvivalLearner(X, y)
+        learner.setup(random_state=42, cv_folds=3)
+        return learner
+
+    def test_fallback_returns_the_narrowed_frame(self, learner):
+        """Returning the raw X would contradict the warning and, because
+        every row has a NaN in the empty column, would cost complete-case
+        analysis downstream all of the data."""
+        learner._state.imputer = _ExplodingImputer()
+        X = pd.DataFrame({
+            'a': [1.0, np.nan, 3.0],
+            'gone': [np.nan] * 3,
+        })
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            result = learner._get_imputed_X(X, raise_on_error=False)
+
+        assert 'gone' not in result.columns, (
+            "the warning said this column was excluded; the returned frame "
+            "must agree"
+        )
+        assert list(result.columns) == ['a']
+
+    def test_empty_column_warning_points_at_the_caller(self, small_data):
+        """Same standard as the validate_survival_data warning: the user
+        must see their own line, not an mlsurv source line.
+
+        Reached through the public ``ph_test()`` rather than the private
+        method, because that is the frame depth ``stacklevel`` is tuned for:
+        helper -> _get_imputed_X -> the public method -> the user.
+        """
+        X, y = small_data
+        X = X.copy()
+        X['gone'] = np.nan
+        learner = SurvivalLearner(X, y)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            learner.setup(random_state=42, cv_folds=3)
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            learner.ph_test()
+        hits = [w for w in caught if "cannot be imputed" in str(w.message)]
+        assert hits, "the empty-column warning did not fire"
+        assert hits[0].filename == __file__, (
+            f"warning blamed {hits[0].filename}, not the caller"
+        )
+
+class TestGetImputedXWidthChanges:
+    """Any width change must be labelled from the transformer, not guessed."""
+
+    @pytest.fixture
+    def learner(self, small_data):
+        X, y = small_data
+        learner = SurvivalLearner(X, y)
+        learner.setup(random_state=42, cv_folds=3)
+        return learner
+
+    def test_widening_imputer_takes_names_from_transformer(self, learner):
+        """add_indicator=True appends a flag per column and hit the same crash."""
+        from sklearn.impute import SimpleImputer
+
+        learner._state.imputer = SimpleImputer(strategy='median',
+                                               add_indicator=True)
+        X = pd.DataFrame({'a': [1.0, np.nan, 3.0], 'b': [4.0, 5.0, 6.0]})
+        result = learner._get_imputed_X(X)
+
+        assert result.shape == (3, 3)
+        assert list(result.columns)[:2] == ['a', 'b']
+        assert 'missingindicator_a' in result.columns
+
+    def test_unlabelled_width_change_raises_a_readable_error(self, learner):
+        learner._state.imputer = _WideningUnnamedImputer()
+        X = pd.DataFrame({'a': [1.0, np.nan, 3.0]})
+        with pytest.raises(ValueError, match="_WideningUnnamedImputer") as exc:
+            learner._get_imputed_X(X, raise_on_error=True)
+
+        # The point of the fix: not pandas' opaque shape message.
+        assert "Shape of passed values" not in str(exc.value)
+        assert "has no get_feature_names_out" in str(exc.value)
+
+    def test_error_says_when_the_names_were_the_wrong_count(self, learner):
+        """Three things break naming and they need telling apart: absent,
+        raised, and answered with the wrong number of names."""
+        learner._state.imputer = _MiscountingImputer()
+        X = pd.DataFrame({'a': [1.0, np.nan, 3.0]})
+        with pytest.raises(ValueError, match="returned 1 names for 2 columns"):
+            learner._get_imputed_X(X, raise_on_error=True)
+
+    def test_error_carries_the_exception_the_namer_raised(self, learner):
+        learner._state.imputer = _RaisingNamerImputer()
+        X = pd.DataFrame({'a': [1.0, np.nan, 3.0]})
+        with pytest.raises(ValueError, match="raised KeyError") as exc:
+            learner._get_imputed_X(X, raise_on_error=True)
+
+        # Imputation succeeded; only the labelling failed. Saying
+        # "imputation failed" would send the user to the wrong place.
+        assert "stale map" in str(exc.value)
+
+    def test_frame_returning_imputer_is_passed_through(self, learner):
+        """A transformer that labels its own output keeps those labels."""
+        learner._state.imputer = _FrameImputer()
+        X = pd.DataFrame({'a': [1.0, np.nan, 3.0]}, index=[7, 8, 9])
+        result = learner._get_imputed_X(X)
+
+        assert list(result.columns) == ['a_filled']
+        assert list(result.index) == [7, 8, 9]
+
+    def test_same_width_but_different_features_is_labelled_correctly(self):
+        """The width matching proves nothing about what the columns mean.
+
+        Dropping one column and appending one flag nets to no width change,
+        so labelling from the input would attach every result to the wrong
+        feature name without anything failing.
+        """
+        X = pd.DataFrame({
+            'a': [1.0, 2.0, 3.0],
+            'b': [np.nan, 5.0, 6.0],
+            'c': [7.0, 8.0, 9.0],
+        })
+        y = make_survival_array([True, False, True], [5.0, 6.0, 7.0])
+        learner = SurvivalLearner(X, y)
+        learner._state.imputer = _RelabellingImputer()
+        result = learner._get_imputed_X(X)
+
+        assert result.shape[1] == X.shape[1]
+        assert list(result.columns) == ['a', 'c', 'flag_b']
+        # 'c' must carry c's values, not b's.
+        assert result['c'].tolist() == [7.0, 8.0, 9.0]
+
+    def test_reindexed_frame_is_realigned(self, learner):
+        """A transformer returning a fresh RangeIndex must not silently
+        misalign the result against the survival outcomes."""
+        learner._state.imputer = _ReindexingFrameImputer()
+        X = pd.DataFrame({'a': [1.0, np.nan, 3.0]}, index=[7, 8, 9])
+        result = learner._get_imputed_X(X)
+
+        assert list(result.index) == [7, 8, 9]
+
+    def test_row_dropping_frame_raises(self, learner):
+        learner._state.imputer = _RowDroppingFrameImputer()
+        X = pd.DataFrame({'a': [1.0, np.nan, 3.0]})
+        with pytest.raises(ValueError, match="rows for 3 input rows"):
+            learner._get_imputed_X(X, raise_on_error=True)
+
+    def test_residual_nan_in_frame_output_warns(self, learner):
+        learner._state.imputer = _LeakyFrameImputer()
+        X = pd.DataFrame({'a': [1.0, np.nan, 3.0]})
+        with pytest.warns(MethodologicalWarning, match="left missing values"):
+            learner._get_imputed_X(X)

@@ -588,3 +588,73 @@ class TestPHTestResilience:
 
         assert result.empty
         assert learner._state.ph_test_result is result
+
+
+class TestEmptyColumnDoesNotAbortDiagnostics:
+    """A 100%-missing feature used to take the whole diagnostic block down.
+
+    The imputer drops such a column, so the imputed matrix was rebuilt with
+    one name too many and pandas raised "Shape of passed values"; setup()
+    logged "skipping PH and linearity diagnostics" and left both results
+    unset.
+    """
+
+    @staticmethod
+    def _data_with_empty_column():
+        X, y = _make_constant_hazard_data(n=200, p=5)
+        X = X.copy()
+        X.loc[X.index[:20], "x0"] = np.nan  # ordinary missingness to impute
+        X["dz_stage"] = np.nan              # no observed value at all
+        return X, y
+
+    def test_ph_and_linearity_survive(self):
+        X, y = self._data_with_empty_column()
+        learner = SurvivalLearner(X, y)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            learner.setup(random_state=42, verbose=False)
+
+        ph = learner.ph_test_result
+        lin = learner.linearity_test_result
+        assert ph is not None and not ph.empty
+        assert lin is not None and not lin.empty
+
+    def test_empty_feature_absent_from_results(self):
+        X, y = self._data_with_empty_column()
+        learner = SurvivalLearner(X, y)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            learner.setup(random_state=42, verbose=False)
+
+        assert "dz_stage" not in set(learner.ph_test_result["feature"])
+        assert "dz_stage" not in set(learner.linearity_test_result["feature"])
+
+    def test_setup_names_the_empty_feature(self):
+        """Two warnings, saying two different things: the data has an empty
+        feature, and the diagnostics were computed without it."""
+        X, y = self._data_with_empty_column()
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            SurvivalLearner(X, y).setup(random_state=42, verbose=False)
+
+        named = [str(x.message) for x in w
+                 if issubclass(x.category, MethodologicalWarning)
+                 and "no observed values" in str(x.message)]
+        assert len(named) == 2
+        assert all("dz_stage" in m for m in named)
+        assert any("drops them before model fitting" in m for m in named)
+        assert any("covers 5 features, not 6" in m for m in named)
+
+    def test_matches_a_run_without_the_empty_column(self):
+        """The surviving features must be diagnosed exactly as before."""
+        X, y = self._data_with_empty_column()
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            with_empty = SurvivalLearner(X, y)
+            with_empty.setup(random_state=42, verbose=False)
+            without = SurvivalLearner(X.drop(columns=["dz_stage"]), y)
+            without.setup(random_state=42, verbose=False)
+
+        pd.testing.assert_frame_equal(
+            with_empty.ph_test_result, without.ph_test_result,
+        )

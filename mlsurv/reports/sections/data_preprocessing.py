@@ -9,7 +9,11 @@ from typing import Any, Dict, List, Optional, TYPE_CHECKING
 import numpy as np
 import pandas as pd
 
-from mlsurv.utils import unwrap_pipeline
+from mlsurv.utils import (
+    empty_feature_columns,
+    format_column_list,
+    unwrap_pipeline,
+)
 from mlsurv.reports._constants import P_THRESHOLD_SIGNIFICANT, format_pvalue
 from mlsurv.reports._text import pluralize
 from mlsurv.reports.sections.base import (
@@ -956,6 +960,32 @@ class DataPreprocessingSection(BaseSection):
             md_lines.append("<!-- /MLSURV_RAW_HTML -->")
         md_lines.append("")
 
+        # A 100%-missing variable shows up in the table above as "100.0%" but
+        # its fate does not: imputation has nothing to fill it from, so it is
+        # dropped before fitting and never reaches the models, the assumption
+        # diagnostics, or the importance tables.
+        #
+        # Checked against X_train, not X_full: the imputer is fit on the
+        # training split, so that is the frame that decides what gets
+        # dropped. A variable empty across the whole cohort is empty in
+        # train too, and one empty only in test is still imputed from the
+        # training fit rather than dropped.
+        empty_cols = empty_feature_columns(X_train)
+        if empty_cols:
+            n = len(empty_cols)
+            noun = "variable" if n == 1 else pluralize("variable")
+            verb = "has" if n == 1 else "have"
+            md_lines.append(
+                f"**{n} {noun} ({format_column_list(empty_cols)}) {verb} no "
+                "observed values in the training data.** Nothing can be "
+                "learned from them: an imputer drops them before fitting, "
+                "and they are excluded from the assumption diagnostics. "
+                "They still appear in the feature importance table, scoring "
+                "zero, which is not the same as a feature that was measured "
+                "and found unimportant."
+            )
+            md_lines.append("")
+
         # Store tidy data
         self.data['missing_data'] = pd.DataFrame(
             rows,
@@ -1552,7 +1582,6 @@ class DataPreprocessingSection(BaseSection):
         if self.learner.X_train is None or self.learner.y_train is None:
             return
 
-        X_train = self.learner._get_imputed_X(self.learner.X_train, raise_on_error=True)
         y_train = self.learner.y_train
 
         md_lines.append("### Proportional Hazards Assessment")
@@ -1565,10 +1594,17 @@ class DataPreprocessingSection(BaseSection):
         md_lines.append("")
 
         # Schoenfeld residuals (scatter) and the formal PH test (table) share
-        # one Cox fit; a single failure here degrades both sub-sections.
+        # one Cox fit; a single failure here degrades both sub-sections. The
+        # imputation runs inside the guard too: it can raise (an all-missing
+        # matrix, an imputer whose output cannot be labelled), and outside it
+        # that message would escape the section instead of landing in the
+        # report where the reader is.
         try:
             from mlsurv.evaluation.metrics import ph_test_with_schoenfeld
 
+            X_train = self.learner._get_imputed_X(
+                self.learner.X_train, raise_on_error=True,
+            )
             ph_df, schoenfeld_df = ph_test_with_schoenfeld(
                 X_train, y_train, n_features=X_train.shape[1],
             )
@@ -1754,7 +1790,6 @@ class DataPreprocessingSection(BaseSection):
         if self.learner.X_train is None or self.learner.y_train is None:
             return
 
-        X_train = self.learner._get_imputed_X(self.learner.X_train, raise_on_error=True)
         y_train = self.learner.y_train
 
         md_lines.append("### Linearity Assumption Assessment")
@@ -1767,6 +1802,26 @@ class DataPreprocessingSection(BaseSection):
             "predictions even when the PH assumption itself holds."
         )
         md_lines.append("")
+
+        # Both subsections below need the imputed matrix, and imputation can
+        # raise (an all-missing matrix, an imputer whose output cannot be
+        # labelled). Guarded here rather than in each block, so one failure
+        # reports once and neither block runs on an undefined frame.
+        try:
+            X_train = self.learner._get_imputed_X(
+                self.learner.X_train, raise_on_error=True,
+            )
+        except (ImportError,) + ALL_EXCEPTIONS as e:
+            self._log_recoverable_exception(
+                e, "data_preprocessing: linearity imputation",
+                warn_user=True,
+                user_message=f"Could not compute linearity diagnostics: {e}",
+            )
+            md_lines.append(f"*[Martingale residual plot unavailable: {e}]*")
+            md_lines.append("")
+            md_lines.append(f"*[Linearity test unavailable: {e}]*")
+            md_lines.append("")
+            return
 
         # --- Martingale residual plot (Therneau-Grambsch-Fleming 1990) ---
         try:

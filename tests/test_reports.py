@@ -5427,6 +5427,36 @@ class TestPhase1MissingData:
         assert len(missing) > 0
         assert 'variable' in missing.columns
 
+    def test_empty_variable_is_called_out(self):
+        """A 100%-missing variable reads as "100.0%" in the table; the note
+        says what actually happens to it."""
+        import numpy as np
+
+        from mlsurv.reports.sections.data_preprocessing import DataPreprocessingSection
+
+        learner = _make_mock_learner(with_nan=True)
+        learner.X_train['dz_stage'] = np.nan
+        learner.X_test['dz_stage'] = np.nan
+        _add_mock_model(learner, 'coxph', 0.72)
+
+        section = DataPreprocessingSection(learner)
+        markdown = section.generate()['markdown']
+
+        assert 'dz_stage' in markdown
+        assert 'no observed values' in markdown
+        assert 'Nothing can be learned from them' in markdown
+
+    def test_no_empty_variable_note_when_all_have_data(self):
+        from mlsurv.reports.sections.data_preprocessing import DataPreprocessingSection
+
+        learner = _make_mock_learner(with_nan=True)
+        _add_mock_model(learner, 'coxph', 0.72)
+
+        section = DataPreprocessingSection(learner)
+        markdown = section.generate()['markdown']
+
+        assert 'no observed values' not in markdown
+
     def test_missing_data_clean(self):
         """Clean dataset shows 'No missing values' message."""
         from mlsurv.reports.sections.data_preprocessing import DataPreprocessingSection
