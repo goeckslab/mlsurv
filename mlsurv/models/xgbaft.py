@@ -7,6 +7,7 @@ import pandas as pd
 from scipy import optimize, stats
 
 from mlsurv._warnings import MethodologicalWarning, SuggestionWarning
+from mlsurv._xgboost import import_xgboost
 from mlsurv.models.base import BaseSurvivalModel, SurvivalArray
 
 
@@ -184,18 +185,13 @@ class XGBAFTModel(BaseSurvivalModel):
         Raises
         ------
         ImportError
-            If XGBoost is not installed.
+            If XGBoost is not installed, or is installed but fails to load
+            (a missing OpenMP runtime, most often on macOS).
         ValueError
             If the AFT loss distribution is unrecognized, the distribution
             scale is non-positive, or any survival time is non-positive.
         """
-        try:
-            import xgboost as xgb
-        except ImportError:
-            raise ImportError(
-                "XGBoost is required for XGBAFTModel. "
-                "Install with: pip install xgboost>=1.6.0"
-            )
+        xgb = import_xgboost("XGBAFTModel")
 
         if self.aft_loss_distribution not in _VALID_DISTRIBUTIONS:
             raise ValueError(
@@ -518,7 +514,7 @@ class XGBAFTModel(BaseSurvivalModel):
         risk_scores : ndarray
             Risk scores (higher = higher risk = shorter predicted survival).
         """
-        import xgboost as xgb
+        xgb = import_xgboost("XGBAFTModel")
 
         self._check_is_fitted()
         # output_margin=True returns the raw margin = log(predicted_time).
@@ -654,7 +650,7 @@ class XGBAFTModel(BaseSurvivalModel):
         probs : ndarray of shape (n_samples, n_times)
             Survival probabilities.
         """
-        import xgboost as xgb
+        xgb = import_xgboost("XGBAFTModel")
 
         # mu = log(predicted_survival_time) for each sample
         # output_margin=True returns the raw margin in log-time space.

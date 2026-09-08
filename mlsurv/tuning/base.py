@@ -602,16 +602,28 @@ class BaseTuner:
         is converted to ``optuna.TrialPruned`` (trial state PRUNED). We record
         the message in both cases and re-raise unchanged so Optuna's trial-state
         handling is identical to calling ``self.objective`` directly.
-        ``MemoryError``/``RecursionError``/``ImportError`` propagate without
-        recording, matching the catch-and-prune contract used in
-        ``_evaluate_model`` (see CONTRIBUTING.md "Optuna catch-and-prune").
+        ``MemoryError``/``RecursionError`` propagate without recording,
+        matching the catch-and-prune contract used in ``_evaluate_model``
+        (see CONTRIBUTING.md "Optuna catch-and-prune").  ``ImportError`` is
+        recorded before it is re-raised: ``study.optimize`` runs with
+        ``catch=(Exception,)``, so the re-raise never escapes, and the record
+        is the only trace the trial leaves behind.
         """
         try:
             return self.objective(trial)
         except optuna.TrialPruned as e:
             self._record_trial_failure(str(e) or "Trial pruned: no valid CV scores")
             raise
-        except (MemoryError, RecursionError, ImportError):
+        except (MemoryError, RecursionError):
+            raise
+        except ImportError as e:
+            # Recorded, unlike the two above. A missing or unloadable optional
+            # dependency fails every trial identically, and `catch=(Exception,)`
+            # on study.optimize swallows the re-raise, so without this the
+            # study ends with no recorded failures and the caller gets a bare
+            # "Record does not exist." instead of the reason. Most often this
+            # is xgboost failing to load for want of an OpenMP runtime.
+            self._record_trial_failure(f"{type(e).__name__}: {e}")
             raise
         except Exception as e:
             self._record_trial_failure(f"{type(e).__name__}: {e}")

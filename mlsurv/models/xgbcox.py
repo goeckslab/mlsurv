@@ -3,6 +3,7 @@
 import numpy as np
 from sksurv.linear_model.coxph import BreslowEstimator
 
+from mlsurv._xgboost import import_xgboost
 from mlsurv.models.base import BaseSurvivalModel, SurvivalArray
 from mlsurv.models._overflow import breslow_call_with_clamp
 
@@ -150,15 +151,10 @@ class XGBCoxModel(BaseSurvivalModel):
         Raises
         ------
         ImportError
-            If XGBoost is not installed.
+            If XGBoost is not installed, or is installed but fails to load
+            (a missing OpenMP runtime, most often on macOS).
         """
-        try:
-            import xgboost as xgb
-        except ImportError:
-            raise ImportError(
-                "XGBoost is required for XGBCoxModel. "
-                "Install with: pip install xgboost>=1.6.0"
-            )
+        xgb = import_xgboost("XGBCoxModel")
 
         self._validate_data(X, y)
 

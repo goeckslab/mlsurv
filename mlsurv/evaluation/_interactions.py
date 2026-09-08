@@ -12,6 +12,7 @@ from scipy.stats import skew
 from sklearn.pipeline import Pipeline
 
 from .._warnings import MethodologicalWarning, SuggestionWarning
+from .._xgboost import import_xgboost
 from ..logging_utils import get_logger
 
 logger = get_logger("interactions")
@@ -1037,11 +1038,11 @@ def _compute_pdp_surface(
 def _is_xgb_booster(obj) -> bool:
     """Return True if *obj* is an ``xgboost.Booster``; warn if xgb is missing."""
     try:
-        import xgboost as xgb
-    except ImportError:
+        xgb = import_xgboost("XGBoost interaction detection")
+    except ImportError as exc:
         logger.warning(
-            "Found booster_ attribute but xgboost import failed; "
-            "cannot verify XGBoost Booster type."
+            "Found booster_ attribute but xgboost import failed (%s); "
+            "cannot verify XGBoost Booster type.", exc
         )
         return False
     return isinstance(obj, xgb.Booster)
