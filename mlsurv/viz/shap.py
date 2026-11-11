@@ -46,6 +46,12 @@ def _get_feature_values(feat_shap, feature, X_values, sample_col):
 def _normalize_feature_values(feat_values):
     """Normalize values to [0, 1], handling NaNs and constant features.
 
+    The colour range is the 5th-95th percentile (as in the ``shap``
+    library), and values outside it are clipped to the ends.  Plain
+    min-max scaling would let a few extreme values (e.g. a very high
+    TMB) push every other sample to the same colour.  If the
+    percentile range is empty, the full min-max range is used instead.
+
     String values (from grouped categorical features) are treated as
     uniform 0.5 (neutral color).
     """
@@ -58,10 +64,14 @@ def _normalize_feature_values(feat_values):
     if len(numeric) == 0 or np.all(np.isnan(numeric)):
         feat_min, feat_max = 0.0, 0.0
     else:
-        feat_min, feat_max = np.nanmin(numeric), np.nanmax(numeric)
+        feat_min, feat_max = np.nanpercentile(numeric, [5, 95])
+        if not feat_max > feat_min:
+            feat_min, feat_max = np.nanmin(numeric), np.nanmax(numeric)
 
     if feat_max > feat_min:
-        normalized = (numeric - feat_min) / (feat_max - feat_min)
+        normalized = np.clip(
+            (numeric - feat_min) / (feat_max - feat_min), 0.0, 1.0,
+        )
     else:
         normalized = np.full_like(numeric, 0.5)
 
@@ -555,7 +565,7 @@ def plot_shap_beeswarm(
             showgrid=False, showticklabels=True,
             tickmode="array",
             tickvals=list(range(len(top_features))),
-            ticktext=top_features,
+            ticktext=top_features, automargin=True,
             row=1, col=1,
         )
         main_row, main_col = 1, 2
@@ -585,7 +595,7 @@ def plot_shap_beeswarm(
         marker=dict(
             colorscale='RdBu_r', showscale=True, cmin=0, cmax=1,
             colorbar=dict(
-                title=dict(text='Feature<br>Value', side='right'),
+                title=dict(text='Feature value', side='right'),
                 tickvals=[0, 0.5, 1], ticktext=['Low', 'Mid', 'High'],
                 len=0.5, y=0.75,
             ),
@@ -616,18 +626,21 @@ def plot_shap_beeswarm(
             xaxis_title='SHAP Value (impact on model output)',
             xaxis=dict(zeroline=True, zerolinecolor='gray', zerolinewidth=1),
             yaxis=dict(tickmode='array', tickvals=list(range(len(top_features))),
-                       ticktext=top_features),
+                       ticktext=top_features, automargin=True),
         )
 
+    # Extra top margin holds the direction label between the title and
+    # the plot, so it never overlaps the top row of dots.
     fig.update_layout(
-        margin=dict(l=d["margin_l"] + 20, r=d["margin_r"] + 30, t=d["margin_t"] + 10),
+        margin=dict(l=d["margin_l"] + 20, r=d["margin_r"] + 30, t=d["margin_t"] + 30),
         yaxis_title='',
         showlegend=has_groups,
         legend=dict(x=1.02, xanchor="left", y=0.2, yanchor="middle") if has_groups else {},
     )
 
     fig.add_annotation(
-        x=0.5, y=1.02, xref='paper', yref='paper',
+        x=0.5, y=1.0, xref='paper', yref='paper',
+        xanchor='center', yanchor='bottom', yshift=4,
         text='<span style="color:#1f77b4">\u2190 Decreases Risk</span> | '
              '<span style="color:#d62728">Increases Risk \u2192</span>',
         showarrow=False, font=dict(size=d["font_size_annotation"]),

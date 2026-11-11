@@ -119,7 +119,11 @@ def _run_explainer(model, X_background, X_explain, max_background, random_state=
     # the order changes the result.
     explainer = shap.Explainer(predict_fn, masker, algorithm="permutation",
                                seed=random_state)
-    explanation = explainer(_numeric_frame_for_shap(X_explain, "explained set"))
+    # silent=True hides shap's own progress bar; mlsurv prints its own progress
+    # line, and the bar fills notebooks with dozens of output lines.
+    explanation = explainer(
+        _numeric_frame_for_shap(X_explain, "explained set"), silent=True,
+    )
     base = np.asarray(explanation.base_values).ravel()
     base_value = float(base[0]) if base.size else 0.0
     return explanation.values, base_value

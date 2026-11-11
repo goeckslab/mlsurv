@@ -2438,6 +2438,71 @@ class TestSHAPVisualization:
         assert isinstance(fig, go.Figure)
 
 
+class TestBeeswarmDefaults:
+    """Beeswarm colour scaling and label placement (no shap library needed)."""
+
+    def test_colour_ignores_extreme_values(self):
+        """One extreme value must not push every other sample to one colour."""
+        from mlsurv.viz.shap import _normalize_feature_values
+
+        values = np.append(np.linspace(1.0, 20.0, 99), 400.0)
+        norm = _normalize_feature_values(values)
+
+        assert norm.min() == 0.0 and norm.max() == 1.0
+        # Min-max scaling would put the median near 0.03; percentile
+        # scaling spreads the bulk of the data across the colour range.
+        assert np.median(norm) == pytest.approx(0.5, abs=0.05)
+        assert norm[-1] == 1.0
+
+    def test_colour_falls_back_to_min_max(self):
+        """If the 5th-95th percentile range is empty, use min-max."""
+        from mlsurv.viz.shap import _normalize_feature_values
+
+        values = np.array([0.0] * 97 + [1.0, 2.0, 3.0])
+        norm = _normalize_feature_values(values)
+
+        assert norm.min() == 0.0 and norm.max() == 1.0
+        assert norm[-1] == 1.0
+
+    def test_direction_label_and_colour_bar_title(self):
+        """Direction label sits above the plot; colour-bar title is one line."""
+        from mlsurv.viz.shap import plot_shap_beeswarm
+
+        rng = np.random.RandomState(0)
+        shap_df = pd.DataFrame({
+            'feature': np.repeat(['a', 'b'], 20),
+            'sample_idx': np.tile(np.arange(20), 2),
+            'shap_value': rng.randn(40),
+            'feature_value': rng.rand(40),
+        })
+        fig = plot_shap_beeswarm(shap_df)
+
+        label = [a for a in fig.layout.annotations if 'Risk' in (a.text or '')]
+        assert len(label) == 1
+        assert label[0].yref == 'paper'
+        assert label[0].y >= 1.0 and label[0].yanchor == 'bottom'
+        bars = [t for t in fig.data if t.marker and t.marker.showscale]
+        assert bars[0].marker.colorbar.title.text == 'Feature value'
+
+    @pytest.mark.parametrize('groups', [None, {'a': 'clinical', 'b': 'genomic'}])
+    def test_feature_labels_get_room(self, groups):
+        """Long feature names widen the left margin instead of being cut off."""
+        from mlsurv.viz.shap import plot_shap_beeswarm
+
+        rng = np.random.RandomState(0)
+        shap_df = pd.DataFrame({
+            'feature': np.repeat(['a', 'b'], 20),
+            'sample_idx': np.tile(np.arange(20), 2),
+            'shap_value': rng.randn(40),
+            'feature_value': rng.rand(40),
+        })
+        fig = plot_shap_beeswarm(shap_df, feature_groups=groups)
+
+        # The axis holding the feature labels is the first y-axis in both
+        # layouts (the group strip when grouped, the main plot otherwise).
+        assert fig.layout.yaxis.automargin is True
+
+
 class TestMultiModelDefaults:
     """Test multi-model default behavior for plot_* methods."""
 

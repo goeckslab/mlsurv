@@ -173,6 +173,36 @@ class TestExplainerSamplesBackground:
         pd.testing.assert_frame_equal(seen['first'], X_train)
 
 
+class TestExplainerIsSilent:
+    """shap's own progress bar is turned off (mlsurv prints its own progress)."""
+
+    @requires_shap
+    def test_explainer_called_with_silent(self, train_test_data):
+        """The explainer call passes silent=True."""
+        from mlsurv.evaluation._shap import _run_explainer
+        from mlsurv.models import CoxPHModel
+
+        X_train, X_test, y_train, y_test = train_test_data
+        model = CoxPHModel()
+        model.fit(X_train, y_train)
+
+        seen = {}
+        explanation = mock.Mock(values=np.zeros((5, X_test.shape[1])),
+                                base_values=np.zeros(5))
+
+        def _fake_explainer(*args, **kwargs):
+            def _call(X, **call_kwargs):
+                seen.update(call_kwargs)
+                return explanation
+            return _call
+
+        with mock.patch('shap.Explainer', side_effect=_fake_explainer):
+            _run_explainer(model, X_train, X_test.iloc[:5], max_background=10,
+                           random_state=0)
+
+        assert seen.get('silent') is True
+
+
 @pytest.mark.shap
 @pytest.mark.integration
 class TestCallSitesForwardXTrainBackground:
