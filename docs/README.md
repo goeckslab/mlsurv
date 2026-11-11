@@ -25,5 +25,5 @@ For a quick overview and installation instructions, see the [main README](../REA
 | 3 | [Benchmarks](../examples/vignette_03_benchmarks.ipynb) | SUPPORT, METABRIC, FLCHAIN, GBSG2, Veterans | ~10-12 min |
 | 4 | [Custom Components](../examples/vignette_04_custom_components.ipynb) | TCGA BRCA (n=1,071) | ~2-3 min |
 | 5 | [Advanced CV & Tuning](../examples/vignette_05_advanced_cv_tuning.ipynb) | Rotterdam, GBSG2 | ~3 min |
-| 6 | [Tool Comparison](../examples/vignette_06_tool_comparison.ipynb) | GBSG2, METABRIC | ~2 min |
+| 6 | [Tool Comparison](../examples/vignette_06_tool_comparison.ipynb) | GBSG2, METABRIC | ~6 min |
 | 7 | [Immunotherapy Case Study](../examples/vignette_07_immunotherapy_case_study.ipynb) | Chowell (n=1,479) + 7 external cohorts | ~15-20 min |

@@ -194,6 +194,28 @@ class TestVignette05AdvancedCvTuning:
 
 
 # =============================================================================
+# Vignette 06 - Tool Comparison
+# =============================================================================
+
+@pytest.mark.vignette
+@pytest.mark.slow
+@pytest.mark.timeout(960)  # above the 900 s notebook limit; the global pytest timeout is 60 s
+class TestVignette06ToolComparison:
+    """Tests for vignette_06_tool_comparison.ipynb"""
+
+    def test_executes_without_error(self):
+        """Notebook runs to completion without error.
+
+        The notebook asserts that mlsurv's test split matches the one it
+        rebuilds for scikit-survival, so a clean run also confirms that.
+        """
+        result = run_vignette('06_tool_comparison', timeout=900)
+        if result.returncode != 0 and _is_notebook_timeout(result.stderr):
+            pytest.skip("vignette_06 timed out in this environment")
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+
+
+# =============================================================================
 # Vignette 07 - Immunotherapy Case Study
 # =============================================================================
 

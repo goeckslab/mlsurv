@@ -11,7 +11,7 @@ Example vignettes demonstrating mlsurv package usage.
 | `vignette_03_benchmarks.ipynb` | Kvamme et al. (2019) benchmark | SUPPORT, METABRIC, FLCHAIN, GBSG2, Veterans | ~10-12min |
 | `vignette_04_custom_components.ipynb` | Custom components demo | TCGA BRCA | ~1min |
 | `vignette_05_advanced_cv_tuning.ipynb` | Advanced CV & tuning | GBSG2 + Rotterdam | ~3min |
-| `vignette_06_tool_comparison.ipynb` | mlsurv vs scikit-survival vs lifelines | GBSG2 + METABRIC | ~2min |
+| `vignette_06_tool_comparison.ipynb` | mlsurv vs scikit-survival vs lifelines: code, fidelity, tuning | GBSG2 + METABRIC | ~6min |
 | `vignette_07_immunotherapy_case_study.ipynb` | LORIS immunotherapy case study with benchmarking & external validation | Chowell + 6-7 external cohorts (6 OS / 7 PFS) | ~35min |
 
 ## Helpers
