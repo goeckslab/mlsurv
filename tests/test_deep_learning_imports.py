@@ -243,8 +243,8 @@ def _xgb_torch_warnings(fn):
 def macos_with_torch(monkeypatch):
     """Make mlsurv._xgboost see macOS with torch loaded.
 
-    Patches the ``sys`` name inside that module only, so nothing else in the
-    process (xgboost's own platform checks, real torch) is affected.
+    Patches ``sys`` and ``os`` inside the warning module. The native OpenMP
+    runtime still sees the real ``OMP_NUM_THREADS`` setting during XGBoost fits.
     """
     import mlsurv._xgboost as xgb_guard
 
@@ -253,7 +253,7 @@ def macos_with_torch(monkeypatch):
         modules={**sys.modules, "torch": types.ModuleType("torch")},
     )
     monkeypatch.setattr(xgb_guard, "sys", fake_sys)
-    monkeypatch.delenv("OMP_NUM_THREADS", raising=False)
+    monkeypatch.setattr(xgb_guard, "os", types.SimpleNamespace(environ={}))
     return fake_sys
 
 
@@ -265,15 +265,15 @@ def test_macos_torch_warning_fires(macos_with_torch):
 
 @pytest.mark.parametrize("case", ["not_macos", "no_torch", "omp_one"])
 def test_macos_torch_warning_silent(macos_with_torch, monkeypatch, case):
-    from mlsurv._xgboost import warn_if_torch_loaded_on_macos
+    import mlsurv._xgboost as xgb_guard
 
     if case == "not_macos":
         macos_with_torch.platform = "linux"
     elif case == "no_torch":
         del macos_with_torch.modules["torch"]
     else:
-        monkeypatch.setenv("OMP_NUM_THREADS", "1")
-    assert _xgb_torch_warnings(warn_if_torch_loaded_on_macos) == []
+        monkeypatch.setitem(xgb_guard.os.environ, "OMP_NUM_THREADS", "1")
+    assert _xgb_torch_warnings(xgb_guard.warn_if_torch_loaded_on_macos) == []
 
 
 @pytest.mark.parametrize("model_name", ["xgbcox", "xgbaft"])
