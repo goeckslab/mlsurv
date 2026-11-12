@@ -138,6 +138,10 @@ With deep learning support (PyTorch, pycox) for DeepSurv / DeepHit:
 pip install "mlsurv[deep]"
 ```
 
+On Intel Macs, use Python 3.11 or 3.12 for `mlsurv[deep]`. These versions have
+Intel macOS PyTorch wheels. The `deep` extra selects compatible NumPy, Numba,
+and PyArrow versions automatically on Intel macOS.
+
 **macOS note:** the XGBoost models (`xgbaft`, `xgbcox`) need the OpenMP runtime,
 which macOS does not ship by default. If you see an error about `libomp.dylib`
 failing to load, install it once with Homebrew:
