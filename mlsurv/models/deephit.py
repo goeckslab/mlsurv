@@ -179,21 +179,18 @@ class DeepHitModel(PycoxSerializationMixin, BaseSurvivalModel):
         Raises
         ------
         ImportError
-            If PyTorch and pycox are not installed.
+            If torch, torchtuples, or pycox is missing, or is installed but
+            fails to load.
         ValueError
             If the pycox hyperparameters are invalid or the configured
             activation function is unsupported.
         """
-        try:
-            import torch
-            import torchtuples as tt
-            from pycox.models import DeepHitSingle
-            from pycox.preprocessing.label_transforms import LabTransDiscreteTime
-        except ImportError as exc:
-            raise ImportError(
-                "PyTorch and pycox are required for DeepHitModel. "
-                "Install with: pip install mlsurv[deep]"
-            ) from exc
+        from mlsurv.models._torch import import_deep_learning
+        import_deep_learning("DeepHitModel")
+        import torch
+        import torchtuples as tt
+        from pycox.models import DeepHitSingle
+        from pycox.preprocessing.label_transforms import LabTransDiscreteTime
 
         self._validate_data(X, y)
         self._validate_pycox_params()

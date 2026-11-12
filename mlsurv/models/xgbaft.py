@@ -7,7 +7,7 @@ import pandas as pd
 from scipy import optimize, stats
 
 from mlsurv._warnings import MethodologicalWarning, SuggestionWarning
-from mlsurv._xgboost import import_xgboost
+from mlsurv._xgboost import import_xgboost, warn_if_torch_loaded_on_macos
 from mlsurv.models.base import BaseSurvivalModel, SurvivalArray
 
 
@@ -190,8 +190,14 @@ class XGBAFTModel(BaseSurvivalModel):
         ValueError
             If the AFT loss distribution is unrecognized, the distribution
             scale is non-positive, or any survival time is non-positive.
+
+        Warns
+        -----
+        SuggestionWarning
+            On macOS, when PyTorch is already loaded, since the fit can hang.
         """
         xgb = import_xgboost("XGBAFTModel")
+        warn_if_torch_loaded_on_macos()
 
         if self.aft_loss_distribution not in _VALID_DISTRIBUTIONS:
             raise ValueError(

@@ -146,6 +146,15 @@ failing to load, install it once with Homebrew:
 brew install libomp
 ```
 
+If you also installed `mlsurv[deep]`: PyTorch brings its own copy of OpenMP, and on
+macOS an XGBoost model (`xgbcox`, `xgbaft`) fit after a deep model (`deepsurv`,
+`deephit`) in the same Python session can hang or crash. mlsurv loads PyTorch only
+when a deep model is trained or loaded. Note that `run()` with no model list includes
+the deep models whenever `mlsurv[deep]` is installed. To use both kinds in one
+session, set `OMP_NUM_THREADS=1` before starting Python (for example
+`OMP_NUM_THREADS=1 jupyter lab`), or run them in separate sessions. mlsurv warns
+before an XGBoost fit when PyTorch is already loaded.
+
 To install the latest unreleased version from GitHub:
 
 ```bash

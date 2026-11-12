@@ -5,6 +5,27 @@ All notable changes to mlsurv are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **PyTorch loads only when a deep model is used.** `setup()` and
+  `list_models()` used to import torch and pycox just to check whether they
+  were installed. On macOS, once PyTorch's copy of OpenMP is in the process,
+  a later XGBoost fit can hang or crash, so this hit sessions that never used
+  a deep model. The check now looks the packages up without importing them.
+- **A torch install that fails to load no longer crashes `setup()`.** The old
+  check caught only `ImportError`, so a torch that raised `OSError` on import
+  (a blocked or missing DLL on Windows) crashed `setup()` for every model.
+  Training DeepSurv or DeepHit now reports a load failure as an `ImportError`
+  that keeps the loader's message and tells a broken install apart from a
+  missing one, and `run()` drops the deep model with a warning while the
+  other models still train.
+- **macOS: XGBoost warns when PyTorch is already loaded.** Fitting `xgbcox`
+  or `xgbaft` after a deep model in the same session can still hang on macOS.
+  mlsurv now warns before the fit and names the fix: set `OMP_NUM_THREADS=1`
+  before starting Python, or use separate sessions.
+
 ## [0.2.0] - 2026-09-08
 
 ### Added

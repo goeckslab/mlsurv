@@ -272,9 +272,13 @@ class EnvironmentSection(BaseSection):
                             {'Property': 'GPU Device',
                              'Value': 'unavailable (query failed)'}
                         )
-            except ImportError:
+            except (ImportError, OSError) as exc:
+                # OSError: torch is installed but its libraries failed to load.
+                self._log_recoverable_exception(
+                    exc, "environment: torch import",
+                )
                 rows.append(
-                    {'Property': 'GPU Available', 'Value': 'torch not installed'}
+                    {'Property': 'GPU Available', 'Value': 'torch not available'}
                 )
 
         return pd.DataFrame(rows)

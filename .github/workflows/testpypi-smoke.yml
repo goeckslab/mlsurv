@@ -38,6 +38,11 @@ jobs:
       - name: Install libomp on macOS (XGBoost OpenMP runtime)
         if: runner.os == 'macOS'
         run: brew install libomp
+      # torch's own libomp next to XGBoost's makes XGBoost fits hang on macOS
+      # once a deep-model test has loaded torch (see ci.yml).
+      - name: Limit OpenMP to one thread on macOS (torch + XGBoost in one process)
+        if: runner.os == 'macOS'
+        run: echo "OMP_NUM_THREADS=1" >> "$GITHUB_ENV"
       - run: python -m pip install --upgrade pip
       # CPU-only torch first so the [deep] extra doesn't pull the ~4 GB CUDA stack.
       - run: pip install torch --index-url https://download.pytorch.org/whl/cpu
