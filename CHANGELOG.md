@@ -25,6 +25,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or `xgbaft` after a deep model in the same session can still hang on macOS.
   mlsurv now warns before the fit and names the fix: set `OMP_NUM_THREADS=1`
   before starting Python, or use separate sessions.
+- **Intel macOS: `pip install "mlsurv[deep]"` now resolves.** The last
+  PyTorch release for Intel Macs needs NumPy 1.x. On Intel macOS only, the
+  `deep` extra now keeps NumPy below 2 and PyArrow below 26, and pins Numba
+  to 0.62.1. Use Python 3.11 or 3.12 there.
 
 ## [0.2.0] - 2026-09-08
 
