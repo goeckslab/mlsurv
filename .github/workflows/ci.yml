@@ -28,6 +28,10 @@ on:
         type: choice
         options: [fast, full, macos, macos-intel]
         default: fast
+      intel_compat:
+        description: 'Use Intel-compatible Numba and NumPy for the macos-intel tier'
+        type: boolean
+        default: false
 
 concurrency:
   # Per-ref so a PR run and a main run don't cancel each other; a new push to the
@@ -97,7 +101,17 @@ jobs:
           python-version: '3.12'
       - run: brew install libomp
       - name: Install mlsurv with the deep extra
-        run: python -m pip install '.[deep]'
+        env:
+          INTEL_COMPAT: ${{ inputs.intel_compat }}
+        run: |
+          export TMPDIR="$RUNNER_TEMP"
+          if [[ "$INTEL_COMPAT" == 'true' ]]; then
+            # Numba 0.62.1 has Intel wheels for both Numba and llvmlite.
+            # PyTorch 2.2.2 on Intel needs NumPy 1.x for NumPy interop.
+            python -m pip install '.[deep]' 'numba==0.62.1' 'numpy<2'
+          else
+            python -m pip install '.[deep]'
+          fi
       - name: Fit DeepSurv and XGBoost in one process
         run: |
           python -u - <<'PY'
