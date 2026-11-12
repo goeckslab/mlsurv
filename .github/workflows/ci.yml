@@ -5,8 +5,9 @@ name: CI
 #     full matrix give green/red signal without watching a dashboard (GitHub
 #     emails on failed scheduled runs).
 #   * Public only (github.repository == goeckslab/mlsurv): push-to-main and
-#     pull_request run the fast tier for per-change feedback, and the weekly full
-#     matrix expands to every supported OS/Python combo. These stay inert while
+#     pull_request run the fast tier for per-change feedback. Pull requests also
+#     check the macOS OpenMP regression, and the weekly full matrix expands to
+#     every supported OS/Python combo. These stay inert while
 #     the repo is private — development ff-merges to main many
 #     times a day, so per-commit runs would be noise, and the matrix is trimmed
 #     to fit the 2,000-min/month free tier — and auto-activate the moment the
@@ -25,7 +26,7 @@ on:
       tier:
         description: 'Tier to run on manual dispatch'
         type: choice
-        options: [fast, full]
+        options: [fast, full, macos]
         default: fast
 
 concurrency:
@@ -55,6 +56,32 @@ jobs:
       - run: python -m pip install --upgrade pip
       - run: pip install -e .[dev]
       - run: pytest          # fast tier (default)
+
+  macos:
+    name: macOS OpenMP regression
+    if: >-
+      (github.event_name == 'workflow_dispatch' && inputs.tier == 'macos') ||
+      (github.event_name == 'pull_request' && github.repository == 'goeckslab/mlsurv')
+    runs-on: macos-15
+    timeout-minutes: 20
+    env:
+      OMP_NUM_THREADS: '1'
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - run: brew install libomp
+      - run: python -m pip install -e '.[deep,dev]'
+      - run: >-
+          python -m pytest
+          tests/test_deep_learning_imports.py
+          tests/test_xgboost_import_guard.py
+          tests/test_report_environment_section.py
+          tests/test_xgbaft.py
+          tests/test_xgb_early_stopping.py
 
   # Emits the full-tier matrix: trimmed while private to fit the free
   # CI-minute budget, expanded to every supported combo once public.
