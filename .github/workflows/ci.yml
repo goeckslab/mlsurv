@@ -29,7 +29,7 @@ on:
         options: [fast, full, macos, macos-intel]
         default: fast
       intel_compat:
-        description: 'Use Intel-compatible Numba and NumPy for the macos-intel tier'
+        description: 'Use dependency versions compatible with Intel PyTorch for the macos-intel tier'
         type: boolean
         default: false
 
@@ -108,7 +108,8 @@ jobs:
           if [[ "$INTEL_COMPAT" == 'true' ]]; then
             # Numba 0.62.1 has Intel wheels for both Numba and llvmlite.
             # PyTorch 2.2.2 on Intel needs NumPy 1.x for NumPy interop.
-            python -m pip install '.[deep]' 'numba==0.62.1' 'numpy<2'
+            # PyArrow 26 requires NumPy 2 at import time.
+            python -m pip install '.[deep]' 'numba==0.62.1' 'numpy<2' 'pyarrow<26'
           else
             python -m pip install '.[deep]'
           fi
