@@ -3,7 +3,7 @@
 import numpy as np
 from sksurv.linear_model.coxph import BreslowEstimator
 
-from mlsurv._xgboost import import_xgboost
+from mlsurv._xgboost import import_xgboost, warn_if_torch_loaded_on_macos
 from mlsurv.models.base import BaseSurvivalModel, SurvivalArray
 from mlsurv.models._overflow import breslow_call_with_clamp
 
@@ -153,8 +153,14 @@ class XGBCoxModel(BaseSurvivalModel):
         ImportError
             If XGBoost is not installed, or is installed but fails to load
             (a missing OpenMP runtime, most often on macOS).
+
+        Warns
+        -----
+        SuggestionWarning
+            On macOS, when PyTorch is already loaded, since the fit can hang.
         """
         xgb = import_xgboost("XGBCoxModel")
+        warn_if_torch_loaded_on_macos()
 
         self._validate_data(X, y)
 

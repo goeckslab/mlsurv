@@ -389,13 +389,13 @@ def get_model(name: str, n_samples=None, n_features=None, n_events=None, **kwarg
 
 
 def _is_deep_learning_available():
-    """Check if pycox is installed for deep learning model support."""
-    try:
-        import torch  # noqa: F401
-        import pycox  # noqa: F401
-        return True
-    except ImportError:
-        return False
+    """True if torch, torchtuples, and pycox are installed.
+
+    Checks without importing them, so listing models never loads torch.
+    See ``mlsurv/models/_torch.py`` for why that matters.
+    """
+    from mlsurv.models._torch import is_deep_learning_installed
+    return is_deep_learning_installed()
 
 
 def list_models(include_unavailable=False):

@@ -73,11 +73,11 @@ def _handle_model_error(
     elif isinstance(exc, ImportError):
         log_exception(
             logger, exc,
-            f"Missing dependency for {model_name}",
+            f"Could not load a dependency for {model_name}",
             warn_user=True,
             user_message=(
-                f"Missing dependency for {model_name}: {exc}. "
-                f"Install the required package and retry."
+                f"Could not load a dependency for {model_name}: {exc}. "
+                f"Install or repair the required package and retry."
             ),
             category=SuggestionWarning,
         )
@@ -88,10 +88,14 @@ def _handle_model_error(
         )
     detail = f"{type(exc).__name__}: {exc}"
     if isinstance(exc, ImportError):
-        # Carry the install hint in the detail string so it survives in both
-        # the all-failed RuntimeError and the consolidated drop warning, even
-        # when the per-model SuggestionWarning is suppressed (warn_user=False).
-        detail += " (install the missing dependency and retry)"
+        # Carry the hint in the detail string so it survives in both the
+        # all-failed RuntimeError and the consolidated drop warning, even when
+        # the per-model SuggestionWarning is suppressed (warn_user=False). An
+        # ImportError can mean "installed but fails to load", hence "repair".
+        detail += (
+            " (install the missing dependency, or repair a broken install, "
+            "and retry)"
+        )
     return detail
 
 

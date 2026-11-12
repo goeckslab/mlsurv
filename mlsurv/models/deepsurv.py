@@ -277,16 +277,9 @@ class DeepSurvModel(PycoxSerializationMixin, BaseSurvivalModel):
         self.converged_ = None
 
     def _check_dependencies(self):
-        """Check that torch and pycox are installed."""
-        try:
-            import torch  # noqa: F401
-            import pycox  # noqa: F401
-            import torchtuples as tt  # noqa: F401
-        except ImportError as e:
-            raise ImportError(
-                "DeepSurvModel requires torch, pycox, and torchtuples. "
-                "Install with: pip install mlsurv[deep]"
-            ) from e
+        """Import torch, torchtuples, and pycox, or raise a clear ImportError."""
+        from mlsurv.models._torch import import_deep_learning
+        import_deep_learning("DeepSurvModel")
 
     def _should_use_early_stopping(self, y: SurvivalArray) -> bool:
         """Check whether the dataset supports early stopping.
@@ -332,6 +325,9 @@ class DeepSurvModel(PycoxSerializationMixin, BaseSurvivalModel):
 
         Raises
         ------
+        ImportError
+            If torch, torchtuples, or pycox is missing, or is installed but
+            fails to load.
         ValueError
             If the configured activation is not a supported option, or if
             an unrelated stratification failure surfaces during the

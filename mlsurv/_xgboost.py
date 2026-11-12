@@ -15,9 +15,25 @@ runtime, and inside a multi-model ``run()`` it becomes a pruned trial and
 the model is dropped from the results. Both failures mean the same thing to
 a caller (xgboost is unusable here), so both are reported as ``ImportError``
 with a message naming the actual remedy.
+
+The module also holds ``warn_if_torch_loaded_on_macos``, the warning given
+before an XGBoost fit on macOS once PyTorch is in the process.
 """
 
+import os
+import sys
+import warnings
+
 _INSTALL_HINT = "Install with: pip install xgboost>=1.6.0"
+
+_MACOS_TORCH_MESSAGE = (
+    "XGBoost is running in a process that has already loaded PyTorch. On "
+    "macOS, PyTorch loads its own copy of the OpenMP runtime, and once it "
+    "is in the process an XGBoost fit can hang or crash. To avoid this, set "
+    "OMP_NUM_THREADS=1 before starting Python (setting it inside a running "
+    "session is too late), or fit the deep models (deepsurv, deephit) and "
+    "the XGBoost models (xgbcox, xgbaft) in separate sessions."
+)
 
 _RUNTIME_HINT = (
     "xgboost is installed but failed to load, which usually means its "
@@ -69,3 +85,30 @@ def import_xgboost(context: str = "this feature"):
             f"with {type(exc).__name__}: {exc}. {_RUNTIME_HINT}"
         ) from exc
     return xgb
+
+
+def warn_if_torch_loaded_on_macos() -> None:
+    """Warn before an XGBoost fit on macOS when PyTorch is already loaded.
+
+    Once PyTorch's bundled libomp is in the process, an XGBoost fit on macOS
+    can hang or crash, even with XGBoost limited to one thread. Setting
+    ``OMP_NUM_THREADS=1`` before the process starts avoids it, and it is too
+    late to set it here, so all this can do is say so before the fit.
+
+    Silent on other platforms, when torch has not been imported, and when
+    ``OMP_NUM_THREADS=1`` is in the environment. That last check assumes the
+    variable was set before Python started; it cannot tell otherwise.
+
+    A warning raised inside a joblib worker does not reach the user. For
+    ``train()`` and ``run()`` that does not matter: deep models train only in
+    the main process (their CV is sequential), and so does every final fit.
+    ``parameter_sweep(n_jobs>1)`` is a known gap: a worker can train a deep
+    model and then an XGBoost model, and its warning is not shown.
+    """
+    if sys.platform != "darwin" or "torch" not in sys.modules:
+        return
+    if os.environ.get("OMP_NUM_THREADS", "").strip() == "1":
+        return
+    from mlsurv._warnings import SuggestionWarning
+
+    warnings.warn(_MACOS_TORCH_MESSAGE, SuggestionWarning, stacklevel=3)
