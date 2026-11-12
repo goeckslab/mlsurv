@@ -28,10 +28,6 @@ on:
         type: choice
         options: [fast, full, macos, macos-intel]
         default: fast
-      intel_compat:
-        description: 'Use dependency versions compatible with Intel PyTorch for the macos-intel tier'
-        type: boolean
-        default: false
 
 concurrency:
   # Per-ref so a PR run and a main run don't cancel each other; a new push to the
@@ -101,19 +97,12 @@ jobs:
           python-version: '3.12'
       - run: brew install libomp
       - name: Install mlsurv with the deep extra
-        env:
-          INTEL_COMPAT: ${{ inputs.intel_compat }}
         run: |
           export TMPDIR="$RUNNER_TEMP"
-          if [[ "$INTEL_COMPAT" == 'true' ]]; then
-            # Numba 0.62.1 has Intel wheels for both Numba and llvmlite.
-            # PyTorch 2.2.2 on Intel needs NumPy 1.x for NumPy interop.
-            # PyArrow 26 requires NumPy 2 at import time.
-            python -m pip install '.[deep]' 'numba==0.62.1' 'numpy<2' 'pyarrow<26'
-          else
-            python -m pip install '.[deep]'
-          fi
+          python -m pip install '.[deep]'
+          python -m pip check
       - name: Fit DeepSurv and XGBoost in one process
+        working-directory: ${{ runner.temp }}
         run: |
           python -u - <<'PY'
           import os
@@ -129,7 +118,7 @@ jobs:
           print(f"Architecture: {platform.machine()}, PID: {os.getpid()}")
           assert platform.machine() == "x86_64"
           assert os.environ["OMP_NUM_THREADS"] == "1"
-          for package in ("mlsurv", "torch", "numpy", "pycox", "xgboost"):
+          for package in ("mlsurv", "torch", "numpy", "numba", "pyarrow", "pycox", "xgboost"):
               print(f"{package} {version(package)}")
 
           X, y = load_gbsg2()
