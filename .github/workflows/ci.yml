@@ -26,7 +26,7 @@ on:
       tier:
         description: 'Tier to run on manual dispatch'
         type: choice
-        options: [fast, full, macos]
+        options: [fast, full, macos, macos-intel]
         default: fast
 
 concurrency:
@@ -82,6 +82,51 @@ jobs:
           tests/test_report_environment_section.py
           tests/test_xgbaft.py
           tests/test_xgb_early_stopping.py
+
+  macos-intel:
+    name: Intel macOS DeepSurv and XGBoost smoke test
+    if: github.event_name == 'workflow_dispatch' && inputs.tier == 'macos-intel'
+    runs-on: macos-15-intel
+    timeout-minutes: 15
+    env:
+      OMP_NUM_THREADS: '1'
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - run: brew install libomp
+      - name: Install mlsurv with the deep extra
+        run: python -m pip install '.[deep]'
+      - name: Fit DeepSurv and XGBoost in one process
+        run: |
+          python -u - <<'PY'
+          import os
+          import platform
+          import sys
+          from importlib.metadata import version
+
+          from sksurv.datasets import load_gbsg2
+
+          from mlsurv.models import get_model
+          from mlsurv.utils import to_structured_array
+
+          print(f"Architecture: {platform.machine()}, PID: {os.getpid()}")
+          assert platform.machine() == "x86_64"
+          assert os.environ["OMP_NUM_THREADS"] == "1"
+          for package in ("mlsurv", "torch", "numpy", "pycox", "xgboost"):
+              print(f"{package} {version(package)}")
+
+          X, y = load_gbsg2()
+          for column in X.select_dtypes(include="category"):
+              X[column] = X[column].cat.codes.astype(float)
+          target = to_structured_array(y["time"], y["cens"])
+          get_model("deepsurv", epochs=5, random_state=0, device="cpu").fit(X.values, target)
+          assert "torch" in sys.modules
+          print("DeepSurv fit completed")
+          get_model("xgbcox", n_estimators=100, random_state=0).fit(X.values, target)
+          print("XGBoost Cox fit completed in the same process")
+          PY
 
   # Emits the full-tier matrix: trimmed while private to fit the free
   # CI-minute budget, expanded to every supported combo once public.
