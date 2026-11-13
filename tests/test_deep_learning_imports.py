@@ -29,12 +29,18 @@ from mlsurv._warnings import MethodologicalWarning
 
 
 def _broken_importer(exc, broken="torch"):
-    """Stand-in for ``import_module`` that raises *exc* for one package."""
+    """Stand-in for ``import_module`` that raises *exc* for one package.
+
+    The other deep-learning packages come back as empty stand-in modules, so
+    the tests behave the same whether or not torch is really installed.
+    """
     from importlib import import_module as real_import_module
 
     def import_module(name, *args, **kwargs):
         if name == broken:
             raise exc
+        if name in _torch.DEEP_LEARNING_PACKAGES:
+            return types.ModuleType(name)
         return real_import_module(name, *args, **kwargs)
 
     return import_module
