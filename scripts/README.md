@@ -48,6 +48,8 @@ These regenerate or feed the example notebooks.
 |--------|---------|-------|
 | `loris_score_calculator.py` | Compute LORIS / LR5 scores from published coefficients. | Imported by `vignette_07` via a `sys.path` shim. **Load-bearing** (test_vignette_smoke). |
 | `figures/make_vignette_03_supp_table.py` | Build the combined Vignette 03 supplementary table from the saved CSVs. | **Load-bearing** (test_vignette_03_sksurv_targets). |
+| `figures/make_vignette_07_loris_metrics_table.py` | Compare Vignette 07 models with LORIS on the LORIS paper's metrics (response AUC, fixed-time OS AUC), after reproducing the published LORIS values. Reads the saved `results_{OS,PFS}.xlsx`. | `--n-boot 20` for a quick check. |
+| `vignette_07_tuned_vs_default.py` | Refit the six Vignette 07 models without tuning and compare test-set and external-cohort C-index with the tuned models from a saved run. Writes `tuned_vs_default_<OUTCOME>_{test,external}.csv` to `examples/output/vig7/`. | Run with `OS` or `PFS`. A few minutes each. |
 | `figures/tune_vignette_03_support.py` | Re-tune DeepSurv and DeepHit on SUPPORT and print paste-ready constructor params. | Run `--smoke` first. Slow (hours) at full trials. |
 | `figures/example_r_xlsx_consumer.R` | Canonical R consumer of mlsurv's xlsx export, and the fixture that pins the export sheet names. | **Load-bearing** (test_r_consumer_contract). Rename a producer-side sheet key and you must update this file too. |
 

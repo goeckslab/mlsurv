@@ -48,39 +48,31 @@ LORIS_COEFFICIENTS = {
     'Age': 0.0049,       # Age (capped at 85)
 }
 
-# Cancer type calibration terms (from LORIS paper Supplementary Table)
-# These adjust the baseline for different cancer types
+# Cancer type terms, keyed by the CancerType names used in the data files.
+# Source: the official LLR6 formula in the LORIS GitHub README
+# (https://github.com/rootchang/LORIS), terms CancerType1..CancerType16.
+# With these values the published response AUCs reproduce exactly
+# (e.g. Chowell test 0.754, MSK1 0.699, Kato 0.793, Pradat 0.711).
+# The official model has no term for other cancer types (e.g. CNS, unknown
+# primary in MSK2), so they get 0 ('Other').
 CANCER_TYPE_CALIBRATION = {
     'Bladder': -0.3323,
-    'Breast': -0.2632,
-    'CUP': -0.4388,           # Cancer of Unknown Primary
-    'Colorectal': -0.6802,
-    'Esophagogastric': -0.7079,
-    'Glioma': -0.2981,
-    'HNSCC': -0.2015,         # Head and Neck Squamous Cell Carcinoma
-    'HCC': -0.1863,           # Hepatocellular Carcinoma
+    'Breast': -0.3323,
+    'Colorectal': -0.102,
+    'Endometrial': -0.0079,
+    'Esophageal': 0.55,
+    'Gastric': 0.2306,
+    'Head & Neck': 0.0678,
+    'Hepatobiliary': -0.1189,
     'Melanoma': -0.0086,
-    'Mesothelioma': 0.4017,
-    'NSCLC': 0.0008,          # Non-Small Cell Lung Cancer
-    'SCLC': -0.1219,          # Small Cell Lung Cancer
-    'Ovarian': 0.2411,
-    'Pancreatic': -1.1813,
-    'RCC': 0.5451,            # Renal Cell Carcinoma
-    'Sarcoma': -0.0631,
-    'Other': -0.3323,         # Default (same as Bladder)
-}
-
-# Mapping from AllData.xlsx CancerType values to LORIS calibration keys.
-# AllData.xlsx uses descriptive names; LORIS uses abbreviations.
-CANCER_TYPE_ALIAS = {
-    'Head & Neck': 'HNSCC',
-    'Renal': 'RCC',
-    'Hepatobiliary': 'HCC',
-    'Esophageal': 'Esophagogastric',
-    'Gastric': 'Esophagogastric',
-    'Endometrial': 'Other',
-    'CNS': 'Glioma',
-    'Unknown primary': 'CUP',
+    'Mesothelioma': 0.1255,
+    'NSCLC': 0.0008,
+    'Ovarian': -0.052,
+    'Pancreatic': -1.1169,
+    'Renal': 0.5451,
+    'Sarcoma': 0.0542,
+    'SCLC': -0.0033,
+    'Other': 0.0,
 }
 
 
@@ -129,9 +121,9 @@ def map_cancer_type(df):
     """
     Map cancer type information to LORIS calibration keys.
 
-    Reads the ``CancerType`` string column (descriptive names like
-    ``'Head & Neck'`` or ``'Renal'``), mapping each value to a LORIS key via
-    :data:`CANCER_TYPE_ALIAS` and falling back to ``'Other'``.
+    Reads the ``CancerType`` string column (names like ``'Head & Neck'`` or
+    ``'Renal'``). Names in :data:`CANCER_TYPE_CALIBRATION` are kept; any other
+    value becomes ``'Other'``.
 
     Parameters
     ----------
@@ -141,14 +133,10 @@ def map_cancer_type(df):
     Returns
     -------
     pd.Series
-        LORIS calibration key per row (e.g. ``'NSCLC'``, ``'RCC'``).
+        LORIS calibration key per row (e.g. ``'NSCLC'``, ``'Renal'``).
     """
-    # Map descriptive names → LORIS keys via alias, keep direct matches
-    raw = df['CancerType'].copy()
-    return raw.map(
-        lambda ct: CANCER_TYPE_ALIAS.get(ct, ct)
-        if ct in CANCER_TYPE_CALIBRATION or ct in CANCER_TYPE_ALIAS
-        else 'Other'
+    return df['CancerType'].map(
+        lambda ct: ct if ct in CANCER_TYPE_CALIBRATION else 'Other'
     )
 
 
@@ -351,8 +339,8 @@ def main():
     for df in (df_train, df_test):
         df.rename(columns={'SAMPLE_ID': 'PatientID'}, inplace=True)
         mapped = map_cancer_type(df)
-        for key in ('NSCLC', 'Melanoma', 'RCC'):
-            df[f'CancerType.{key}'] = (mapped == key).astype(int)
+        for key, name in (('NSCLC', 'NSCLC'), ('Melanoma', 'Melanoma'), ('RCC', 'Renal')):
+            df[f'CancerType.{key}'] = (mapped == name).astype(int)
 
     print(f"  Train: {len(df_train)} samples, {df_train['Response'].sum()} responders")
     print(f"  Test:  {len(df_test)} samples, {df_test['Response'].sum()} responders")
