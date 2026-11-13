@@ -85,8 +85,9 @@ class TestHeatmaps:
         fig = plot_metric_heatmap(df)
         text = np.array(fig.data[0].text)
 
-        assert text[0, 0] == pytest.approx(0.72, abs=0.001)
-        assert text[1, 1] == pytest.approx(0.16, abs=0.001)
+        # Labels are pre-formatted strings (3 decimals).
+        assert text[0, 0] == '0.720'
+        assert float(text[1, 1]) == pytest.approx(0.16, abs=0.001)
 
     def test_plot_metric_heatmap_specific_metrics(self):
         """plot_metric_heatmap can limit output to selected metrics."""
@@ -156,9 +157,9 @@ class TestHeatmaps:
         # Colorscale bounds must be finite
         assert np.isfinite(fig.data[0].zmin)
         assert np.isfinite(fig.data[0].zmax)
-        # Annotation text for NaN cell should be None (renders blank)
+        # A NaN cell is labeled with a dash; Plotly would format None as "0.000".
         text = np.array(fig.data[0].text)
-        assert text[2, 0] is None
+        assert text[2, 0] == '–'
 
 
 class TestCurves:

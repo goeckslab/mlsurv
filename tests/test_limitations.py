@@ -1427,3 +1427,69 @@ class TestIPCWCompositionRendering:
         assert out is not None
         assert "G_hat not estimable" not in out["detected"]
         assert "effectively off" not in out["action"]
+
+
+class TestIPCWSupportPerCohort:
+    """Flag 14 covers every cohort, not just the last one evaluated."""
+
+    _FLAG = {
+        "n_beyond": 3, "min_g_hat": 0.02, "t_max_train": 10.0, "tau_used": 8.0,
+        "g_hat_source": "test", "n_g_events": 30, "n_g_censored": 30,
+        "min_ipcw_support": 10,
+    }
+
+    def _section(self, test_set_flag=None, by_cohort=None):
+        learner = _FakeLearner()
+        learner._state.ipcw_support_flag = test_set_flag
+        learner._state.ipcw_support_flags = dict(by_cohort or {})
+        return LimitationsSection(learner)
+
+    def test_no_flags_returns_none(self):
+        assert self._section()._check_ipcw_support() is None
+
+    def test_test_set_only_keeps_single_cohort_text(self):
+        out = self._section(self._FLAG, {"main": self._FLAG})._check_ipcw_support()
+        assert out is not None
+        assert "Validation cohort" not in out["detected"]
+        assert out["detected"].startswith("IPCW-weighted metrics")
+
+    def test_every_flagged_external_cohort_is_listed(self):
+        """Two external cohorts flagged and a clean test set: both are named,
+        in the order they were validated."""
+        out = self._section(None, {"MSK2": self._FLAG, "Kato": self._FLAG})._check_ipcw_support()
+        assert out is not None
+        assert "Validation cohort MSK2:" in out["detected"]
+        assert "Validation cohort Kato:" in out["detected"]
+        assert out["detected"].index("MSK2") < out["detected"].index("Kato")
+        assert "Test set" not in out["detected"]
+        assert out["detail"].count("Validation cohort") == 2
+
+    def test_combined_advice_does_not_quote_one_cohorts_settings(self):
+        """With the test set (train G_hat) and an external cohort (test G_hat)
+        both flagged, the shared advice must not attribute one cohort's tau or
+        G_hat source to every cohort; those stay in each cohort's detail."""
+        test_flag = dict(self._FLAG, g_hat_source="train", tau_used=5.0)
+        out = self._section(test_flag, {"main": test_flag, "Kato": self._FLAG})._check_ipcw_support()
+        assert "Test set:" in out["detected"] and "Validation cohort Kato:" in out["detected"]
+        assert "use tau=" not in out["action"]  # no single cohort's tau
+        assert "validation-cohort G_hat" not in out["action"]
+        assert "tau=5.0" in out["detail"] and "tau=8.0" in out["detail"]
+
+
+def test_record_ipcw_support_flag_keeps_test_set_flag_for_external_cohorts():
+    from types import SimpleNamespace
+
+    from mlsurv.learner._evaluation_helpers import _record_ipcw_support_flag
+
+    state = SimpleNamespace(ipcw_support_flag=None, ipcw_support_flags={})
+    test_flag, ext_flag = {"n_beyond": 1}, {"n_beyond": 2}
+
+    _record_ipcw_support_flag(state, "main", test_flag, is_test_set=True)
+    _record_ipcw_support_flag(state, "Kato", ext_flag, is_test_set=False)
+    assert state.ipcw_support_flag is test_flag
+    assert state.ipcw_support_flags == {"main": test_flag, "Kato": ext_flag}
+
+    # A clean re-run of a cohort clears only that cohort's stale flag.
+    _record_ipcw_support_flag(state, "Kato", None, is_test_set=False)
+    assert state.ipcw_support_flags == {"main": test_flag}
+    assert state.ipcw_support_flag is test_flag

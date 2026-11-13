@@ -42,6 +42,7 @@ from ._evaluation_helpers import (
     _emit_heavy_censoring_warning,
     _emit_ipcw_truncation_warning,
     _print_evaluation_output,
+    _record_ipcw_support_flag,
     _resolve_eval_model_names,
     _resolve_ipcw_g_source,
     _resolve_ipcw_tau,
@@ -603,8 +604,12 @@ class CoreEvaluationMixin:
             object.__setattr__(result, 'ipcw_support_flag', ipcw_support_flag)
         except (AttributeError, TypeError):
             pass
-        # Always assign — None clears a stale flag from a prior violating call.
-        self._state.ipcw_support_flag = ipcw_support_flag
+        # validate() evaluates with _store_result=False; keep its flag out of
+        # the test-set field so the report's test-set caveat stays correct.
+        _record_ipcw_support_flag(
+            self._state, _cohort_name, ipcw_support_flag,
+            is_test_set=_store_result,
+        )
 
         # Persist truncation diagnostic so report sections can render a
         # footnote on the metrics table.

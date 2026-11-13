@@ -17,6 +17,7 @@ from ._eval_context import EvalContext
 from ._evaluation_helpers import (
     _IPCW_TAU_AUTO,
     _emit_ipcw_truncation_warning,
+    _record_ipcw_support_flag,
     _resolve_eval_model_names,
     _resolve_ipcw_g_source,
     _resolve_ipcw_tau,
@@ -321,8 +322,9 @@ class BootstrapMixin:
             object.__setattr__(result, 'ipcw_support_flag', ipcw_support_flag)
         except (AttributeError, TypeError):
             pass
-        # Always assign — None clears a stale flag from a prior violating call.
-        self._state.ipcw_support_flag = ipcw_support_flag
+        _record_ipcw_support_flag(
+            self._state, "main", ipcw_support_flag, is_test_set=True,
+        )
 
         # Persist truncation diagnostic on result if it carries the field
         # (BootstrapResult may not — guarded with try/except).

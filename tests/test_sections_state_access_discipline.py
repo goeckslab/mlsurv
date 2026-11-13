@@ -86,6 +86,7 @@ _EXEMPT_STATE_FIELDS = {
     'presplit',
     'stratify_array',
     'ipcw_support_flag',
+    'ipcw_support_flags',
 }
 
 # Matches dotted (``._state.field``), getattr-comma (``._state,``), and alias

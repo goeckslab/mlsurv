@@ -7,8 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-12
+
+### Added
+
+- **`plot_shap(kind='beeswarm', xlim=(xmin, xmax))` sets the SHAP-axis
+  range.** A few extreme SHAP values could compress every other feature into
+  a narrow band. Points outside the range are not drawn. The visualization
+  docs now also show the general fix for any plot: every plot returns a
+  Plotly figure, so `fig.update_xaxes(range=[lo, hi])` works everywhere.
+
+### Changed
+
+- **Jupyter is now an optional extra.** `jupyter` and `ipykernel` were
+  required dependencies, though mlsurv itself never imports them. Install
+  them with `pip install "mlsurv[notebooks]"` to run the tutorial vignettes.
+  The `dev` extra still includes them for the vignette tests.
+
 ### Fixed
 
+- **The IPCW support flag now covers every external cohort.** Each
+  `validate()` call overwrote the learner's single flag, so the Limitations
+  section described only the last cohort validated, and the test-set caveat
+  under the evaluation table could describe an external cohort instead. The
+  test-set flag is now set only by `evaluate()`/`bootstrap()` on the test set,
+  each cohort keeps its own flag, and the limitation flag lists every
+  affected cohort.
+- **Metric heatmaps no longer show "0.000" for missing values.** In
+  `plot_metric_heatmap` and `plot_validation_heatmap`, a missing cell (e.g.
+  PD-L1 on a cohort without it) rendered as "0.000", which reads as a real
+  score. Missing cells now show "–".
+- **`plot_optuna()` on a loaded learner draws the best-value line.** With a
+  live study the history panel shows each trial and the best value so far;
+  after `load_learner()` it showed only a line through the raw trial values.
+  Both now match.
+- **`plot_optuna()` with several models no longer leaves large gaps between
+  rows.** The gap was a fixed fraction of the figure height, so it grew with
+  the number of models; it is now about 80 px.
+- **The subpopulation forest plot omits references with no values.** A
+  reference score with no value in any subgroup (e.g. PD-L1) left an empty
+  row and an empty legend entry.
+- **Docs:** Antolini's C-index is no longer described as "based on
+  cumulative/dynamic AUC"; it compares predicted survival probabilities at
+  each event time.
 - **PyTorch loads only when a deep model is used.** `setup()` and
   `list_models()` used to import torch and pycox just to check whether they
   were installed. On macOS, once PyTorch's copy of OpenMP is in the process,
@@ -278,5 +319,6 @@ and reporting into a single API.
   XGBoost, and PyTorch; bit-exact runs require `n_jobs=1`.
 - **Inline type annotations** shipped with a `py.typed` marker (PEP 561).
 
+[0.3.0]: https://github.com/goeckslab/mlsurv/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/goeckslab/mlsurv/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/goeckslab/mlsurv/releases/tag/v0.1.0

@@ -251,7 +251,7 @@ The `evaluate()` method assesses models on two dimensions using the held-out tes
 |--------|-----|-------------|-----|
 | Harrell's C-index | `harrell` | Concordance probability between predicted risk and observed outcome. Default scoring metric. | <sup>[5](#references)</sup> |
 | Uno's C-index (IPCW) | `ipcw` | Censoring-adjusted concordance using inverse probability of censoring weighting. More robust under heavy censoring. | <sup>[6](#references)</sup> |
-| Antolini's C-index | `ctd` | Time-dependent concordance based on cumulative/dynamic AUC. | <sup>[7](#references)</sup> |
+| Antolini's C-index | `ctd` | Time-dependent concordance: compares the predicted survival probabilities of each comparable pair at the earlier patient's event time, so it uses the whole predicted survival curve rather than a single risk score. | <sup>[7](#references)</sup> |
 | AUC(t) | — | Time-dependent area under the ROC curve, evaluated at user-specified time points. | <sup>[8](#references)</sup> |
 
 ### Calibration Metrics

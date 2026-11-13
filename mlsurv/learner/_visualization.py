@@ -972,7 +972,8 @@ default="bonferroni"
         return_data : bool, default=False
         **kwargs
             Styling options forwarded to the underlying plot function,
-            e.g. ``width``, ``height``, ``title``, ``palette``.
+            e.g. ``width``, ``height``, ``title``, ``palette``. The beeswarm
+            also takes ``xlim=(xmin, xmax)`` to fix the SHAP-axis range.
 
         Returns
         -------

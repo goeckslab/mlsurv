@@ -801,6 +801,13 @@ def plot_grouped_forest(
     if not subpopulations:
         return None
 
+    # Likewise drop models with no point in any remaining subpopulation (e.g.
+    # a reference score such as PD-L1 that has no per-level values), so they
+    # get neither an empty row slot nor an empty legend entry.
+    plotted = set(summary_df.loc[summary_df['point'].notna(), 'model'])
+    model_names = [m for m in model_names if m in plotted]
+    summary_df = summary_df[summary_df['model'].isin(plotted)]
+
     fig = go.Figure()
     n_models = len(model_names)
     n_subpopulations = len(subpopulations)

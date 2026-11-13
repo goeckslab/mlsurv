@@ -126,17 +126,27 @@ Missing values are handled automatically via median imputation during preprocess
 
 ## Installation
 
-Install from PyPI:
+mlsurv requires Python 3.11 or later. Install from PyPI:
 
 ```bash
 pip install mlsurv
 ```
 
-With deep learning support (PyTorch, pycox) for DeepSurv / DeepHit:
+This installs the core dependencies: NumPy, pandas, scikit-learn,
+scikit-survival, lifelines, XGBoost, Optuna, SHAP, and Plotly (with kaleido for
+static image export, plus mistune, tabulate, and openpyxl for reports and Excel
+export).
 
-```bash
-pip install "mlsurv[deep]"
-```
+Optional extras:
+
+| Extra | Adds | Install |
+|---|---|---|
+| `deep` | PyTorch and pycox, for DeepSurv and DeepHit | `pip install "mlsurv[deep]"` |
+| `notebooks` | Jupyter, to run the tutorial vignettes | `pip install "mlsurv[notebooks]"` |
+| `postgres` | psycopg2, for PostgreSQL-backed Optuna studies | `pip install "mlsurv[postgres]"` |
+| `completion` | argcomplete, for shell tab completion of the CLI | `pip install "mlsurv[completion]"` |
+
+Combine extras with commas, e.g. `pip install "mlsurv[deep,notebooks]"`.
 
 On Intel Macs, use Python 3.11 or 3.12 for `mlsurv[deep]`. These versions have
 Intel macOS PyTorch wheels. The `deep` extra selects compatible NumPy, Numba,
@@ -246,7 +256,23 @@ mlsurv includes 10 survival models across 4 categories:
 
 If you use mlsurv in published work, please cite:
 
-> mlsurv: Low-code machine learning for survival analysis. Goecks Lab, Moffitt Cancer Center. https://github.com/goeckslab/mlsurv
+> Pybus AF, Qiu J, Lyra PCM Jr, Dang K, Narvaez-Bandera I, Jolaogun T, Goecks J.
+> A software package for simple and rigorous survival machine learning analysis
+> in biomedical research. *medRxiv*. 2026.
+> doi:[10.64898/2026.08.05.26359034](https://doi.org/10.64898/2026.08.05.26359034)
+
+```bibtex
+@article{pybus2026mlsurv,
+  title   = {A software package for simple and rigorous survival machine learning analysis in biomedical research},
+  author  = {Pybus, Alyssa F. and Qiu, Junhao and Lyra, Paulo Cilas Morais, Jr. and Dang, Khai and Narvaez-Bandera, Isis and Jolaogun, Tosin and Goecks, Jeremy},
+  journal = {medRxiv},
+  year    = {2026},
+  doi     = {10.64898/2026.08.05.26359034},
+  url     = {https://www.medrxiv.org/content/10.64898/2026.08.05.26359034v1}
+}
+```
+
+Please also state the mlsurv version you used (`mlsurv.__version__`).
 
 ## Changelog
 

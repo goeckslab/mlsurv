@@ -414,6 +414,23 @@ def _emit_heavy_censoring_warning(
     return censoring
 
 
+def _record_ipcw_support_flag(state, cohort_name, flag, *, is_test_set):
+    """Store one cohort's IPCW support flag on the learner state.
+
+    ``flag`` is ``None`` when the cohort raised no violation, which clears any
+    stale flag from an earlier call on the same cohort. ``is_test_set`` also
+    updates ``state.ipcw_support_flag``, the test-set flag the evaluation
+    report reads; validate() passes ``False`` so an external cohort never
+    overwrites it.
+    """
+    if flag is None:
+        state.ipcw_support_flags.pop(cohort_name, None)
+    else:
+        state.ipcw_support_flags[cohort_name] = flag
+    if is_test_set:
+        state.ipcw_support_flag = flag
+
+
 def _resolve_ipcw_tau(
     y_train,
     y_test,

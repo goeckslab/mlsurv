@@ -210,9 +210,14 @@ class LearnerState:
     heavy_censoring_warned: Dict[str, bool] = field(default_factory=dict)
 
     # -- IPCW support-violation flag ------------------------
-    # Populated by evaluate()/bootstrap() when test follow-up or G_hat
-    # violates Uno's concordance assumptions. Read by report sections.
+    # Populated by evaluate()/bootstrap() on the test set when follow-up or
+    # G_hat violates Uno's concordance assumptions. Read by report sections.
+    # validate() does not touch it, so it always describes the test set.
     ipcw_support_flag: Optional[dict] = None
+    # The same flag for every cohort evaluated, keyed by cohort name ("main"
+    # for the test set, else the name passed to validate()). A cohort is
+    # absent when its latest evaluation raised no flag.
+    ipcw_support_flags: Dict[str, dict] = field(default_factory=dict)
 
     # -- Artifact tracking --------------------------------------------------
     artifact_path: Optional[str] = None

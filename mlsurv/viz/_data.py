@@ -1108,9 +1108,15 @@ def _build_plots_from_saved_data(result):
     if saved_history:
         trials = [r['trial'] for r in saved_history]
         vals = [r['value'] for r in saved_history]
+        # Match Optuna's plot_optimization_history (used when the live study
+        # is available): one point per trial plus the best value so far.
+        # mlsurv studies always maximize, so "best" is the running maximum.
+        best_so_far = np.fmax.accumulate(np.asarray(vals, dtype=float))  # skips NaN
         opt_hist_fig = go.Figure(data=[
-            go.Scatter(x=trials, y=vals, mode='lines+markers',
-                       name='Objective Value')
+            go.Scatter(x=trials, y=vals, mode='markers',
+                       name='Objective Value'),
+            go.Scatter(x=trials, y=best_so_far.tolist(), mode='lines',
+                       name='Best Value'),
         ])
 
     return param_imp_fig, opt_hist_fig
@@ -1154,11 +1160,14 @@ def build_combined_optuna_figure(models_with_studies, **kwargs):
                 f"{display} – History",
             ])
 
+    # Plotly sizes the gap between rows as a fraction of the total height, so
+    # a fixed fraction grows with the number of models. Keep it ~80 px.
+    height = kwargs.pop('height', 400 * n_models)
     fig = make_subplots(
         rows=n_models, cols=2,
         subplot_titles=subplot_titles,
         horizontal_spacing=0.12,
-        vertical_spacing=0.15 if n_models > 1 else 0.1,
+        vertical_spacing=min(0.15, 80 / height) if n_models > 1 else 0.1,
     )
 
     for row_idx, (name, result) in enumerate(models_with_studies.items(), 1):
@@ -1188,7 +1197,7 @@ def build_combined_optuna_figure(models_with_studies, **kwargs):
 
     fig.update_layout(
         title=kwargs.pop('title', default_title),
-        height=kwargs.pop('height', 400 * n_models),
+        height=height,
         width=kwargs.pop('width', 1000),
         showlegend=False,
     )

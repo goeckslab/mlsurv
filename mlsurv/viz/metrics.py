@@ -462,9 +462,26 @@ _HEATMAP_COLORSCALE = [
 ]
 
 _HEATMAP_HOVER = (
-    "<b>%{y}</b><br>%{x}: %{text:.3f}"
+    "<b>%{y}</b><br>%{x}: %{text}"
     "<br>z-score: %{z:.2f}<extra></extra>"
 )
+
+_MISSING_CELL_TEXT = "–"  # en dash
+
+
+def _heatmap_cell_text(raw, nan_mask):
+    """Cell labels for a metric heatmap: values to 3 decimals, "–" if missing.
+
+    Formatting here rather than with ``texttemplate="%{text:.3f}"`` matters:
+    Plotly formats a missing (``None``) cell with that template as "0.000",
+    which reads as a real score.
+    """
+    values = np.asarray(raw, dtype=float)
+    missing = np.asarray(nan_mask, dtype=bool) | np.isnan(values)
+    labels = np.empty(values.shape, dtype=object)
+    labels[missing] = _MISSING_CELL_TEXT
+    labels[~missing] = [f"{v:.3f}" for v in values[~missing]]
+    return labels
 
 
 def _zscore_with_direction_flip(z, metrics, nan_mask, *, pooled_mean=None,
@@ -545,7 +562,7 @@ def _prepare_heatmap_data(df, metrics, model_col):
     if nan_cols:
         warnings.warn(
             f"plot_metric_heatmap: NaN values in columns {nan_cols}; "
-            f"these cells will appear blank.",
+            f"these cells are shown as '–'.",
             InternalWarning,
             stacklevel=3,
         )
@@ -592,7 +609,7 @@ def plot_metric_heatmap(
 
     If any metric column contains NaN values, an ``InternalWarning`` is emitted.
     NaN cells are excluded from z-score computation (``skipna=True``) and
-    render as blank cells in the heatmap.
+    render as uncolored cells labeled "–".
     """
     validate_columns(df, [model_col], "plot_metric_heatmap")
     raw, z, nan_mask, ordered_labels, metric_labels = _prepare_heatmap_data(
@@ -616,8 +633,8 @@ def plot_metric_heatmap(
             x=metric_labels,
             y=ordered_labels,
             z=z.to_numpy(),
-            text=np.where(nan_mask.to_numpy(), None, np.round(raw.to_numpy(), 3)),
-            texttemplate="%{text:.3f}",
+            text=_heatmap_cell_text(raw.to_numpy(), nan_mask.to_numpy()),
+            texttemplate="%{text}",
             textfont=dict(size=font_size),
             colorscale=_HEATMAP_COLORSCALE,
             zmid=0,
@@ -787,7 +804,7 @@ def plot_faceted_metric_heatmap(
         if nan_cols:
             warnings.warn(
                 f"plot_faceted_metric_heatmap: NaN values in cohort "
-                f"{cname!r}, columns {nan_cols}; these cells will appear blank.",
+                f"{cname!r}, columns {nan_cols}; these cells are shown as '–'.",
                 InternalWarning,
                 stacklevel=2,
             )
@@ -870,11 +887,10 @@ def plot_faceted_metric_heatmap(
                 x=metric_labels,
                 y=ordered_labels,
                 z=z_panel.to_numpy(),
-                text=np.where(
-                    mask_panel.to_numpy(), None,
-                    np.round(raw_panel.to_numpy(), 3),
+                text=_heatmap_cell_text(
+                    raw_panel.to_numpy(), mask_panel.to_numpy(),
                 ),
-                texttemplate="%{text:.3f}",
+                texttemplate="%{text}",
                 textfont=dict(size=font_size),
                 colorscale=_HEATMAP_COLORSCALE,
                 zmid=0,

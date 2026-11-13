@@ -1153,6 +1153,7 @@ class SetupMixin:
             self._state.benchmark_result = None
             self._state.kang_comparison_result = None
             self._state.ipcw_support_flag = None
+            self._state.ipcw_support_flags.clear()
             self._state.reference_overlap_warned.clear()
             self._state.fit_failure_warned.clear()
             # These two dedup the IPCW-truncation and TimeSeriesSplit-CI

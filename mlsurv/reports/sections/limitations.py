@@ -50,6 +50,55 @@ _FLAG_DEFS: list[tuple[str, str]] = [
 ]
 
 
+# Shared Flag 14 (IPCW support) wording, used for one cohort or several.
+_IPCW_WHY = (
+    "Every IPCW-weighted metric (Uno's C-index, AUC(t), Brier, IBS) "
+    "reweights each test observation by 1/G_hat(t) (or 1/G_hat(t)^2 for "
+    "Uno's C-index), where G_hat is the Kaplan-Meier of the "
+    "{g_label} censoring distribution. Beyond that follow-up "
+    "(or where G_hat is very small), these weights explode and a "
+    "handful of late-time observations dominate both the point estimate "
+    "and the bootstrap CI width, producing numbers that no longer behave "
+    "like bias-corrected discrimination/calibration estimates."
+)
+_IPCW_COMPOSITION_WHY = (
+    " Separately, when the G_hat-fitting cohort has too few events or "
+    "too few censored observations, the censoring distribution cannot "
+    "be estimated at all: G_hat stays flat near 1.0, the IPCW weights "
+    "collapse to 1, and Uno's C-index, AUC(t), Brier, and IBS silently "
+    "reduce to their unweighted forms (no NaN, no censoring correction)."
+)
+_IPCW_ADVICE = (
+    "Compare Uno's IPCW against Harrell/Antolini before drawing "
+    "conclusions about discrimination, and prefer Harrell/Antolini "
+    "when their CIs are much tighter. Brier, IBS, and AUC(t) lack "
+    "non-IPCW counterparts, so widened bootstrap CIs (relative to the "
+    "Harrell/Antolini gap) are themselves the symptom — interpret those "
+    "metrics with caution. Pass ipcw_tau=<float> to evaluate()/bootstrap() "
+    "to override the default, or ipcw_tau=None to disable truncation "
+    "(legacy behavior)."
+)
+_IPCW_COMPOSITION_ACTION = (
+    " Because the G_hat-fitting cohort is too thin to estimate the "
+    "censoring distribution, the IPCW correction is effectively off — "
+    "read these IPCW rows as their unweighted counterparts, prefer "
+    "Harrell/Antolini, and verify the cohort composition reflects true "
+    "follow-up rather than dropped or missing survivors."
+)
+
+
+def _ipcw_composition_thin(flag: dict) -> bool:
+    """True when the G_hat-fitting cohort has too few events or censored obs."""
+    n_events = flag.get("n_g_events")
+    n_censored = flag.get("n_g_censored")
+    floor = flag.get("min_ipcw_support", 10)
+    return (
+        n_events is not None
+        and n_censored is not None
+        and min(n_events, n_censored) < floor
+    )
+
+
 class LimitationsSection(BaseSection):
     """Limitations & Caveats section.
 
@@ -791,18 +840,54 @@ class LimitationsSection(BaseSection):
     def _check_ipcw_support(self) -> dict | None:
         """Flag 14: Uno's IPCW concordance evaluated beyond training support.
 
-        Reads the ``ipcw_support_flag`` field (an exempt getattr read — no
-        public accessor), the authoritative location updated
-        unconditionally by every evaluate()/bootstrap() call. We deliberately
-        do NOT fall back to per-ModelResult flag attributes — those aren't
-        cleared when a later in-support call replaces the most-recent
-        evaluation, so a fallback would resurrect stale flags from prior
-        violating runs.
+        Covers the test set and every external cohort. Reads the
+        ``ipcw_support_flag`` (test set) and ``ipcw_support_flags`` (one entry
+        per cohort, keyed like the cohort names passed to ``validate()``)
+        state fields — exempt getattr reads, no public accessor. The
+        test-set flag is updated by each evaluate()/bootstrap() call on the
+        test set, the per-cohort record by every evaluate()/bootstrap()/
+        validate() call. We deliberately do NOT fall back to per-ModelResult flag
+        attributes — those aren't cleared when a later in-support call
+        replaces the most-recent evaluation, so a fallback would resurrect
+        stale flags from prior violating runs.
         """
-        flag = getattr(self.learner._state, 'ipcw_support_flag', None)
-        if flag is None:
+        flagged = []
+        main_flag = getattr(self.learner._state, 'ipcw_support_flag', None)
+        if main_flag is not None:
+            flagged.append(("Test set", main_flag))
+        by_cohort = getattr(self.learner._state, 'ipcw_support_flags', {})
+        for cohort, flag in by_cohort.items():
+            if cohort != "main" and flag is not None:
+                flagged.append((f"Validation cohort {cohort}", flag))
+        if not flagged:
             return None
 
+        messages = [(label, self._ipcw_support_message(flag))
+                    for label, flag in flagged]
+        if len(messages) == 1 and flagged[0][0] == "Test set":
+            return messages[0][1]
+        # Several cohorts (or an external one): one line per cohort. Each
+        # cohort has its own tau and G_hat source (in its detail), so the
+        # shared advice must not quote one cohort's values for all of them.
+        any_thin = any(_ipcw_composition_thin(flag) for _, flag in flagged)
+        return {
+            "detected": " ".join(f"{label}: {m['detected']}"
+                                 for label, m in messages),
+            "why": (_IPCW_WHY.format(g_label="corresponding")
+                    + (_IPCW_COMPOSITION_WHY if any_thin else "")),
+            "action": (
+                "The IPCW-weighted rows for each cohort listed above use the "
+                "tau and G_hat source given in that cohort's detail. "
+                + _IPCW_ADVICE
+                + (_IPCW_COMPOSITION_ACTION if any_thin else "")
+            ),
+            "detail": "; ".join(f"{label}: {m['detail']}"
+                                for label, m in messages),
+        }
+
+    @staticmethod
+    def _ipcw_support_message(flag: dict) -> dict:
+        """Detected / why / action / detail text for one cohort's IPCW flag."""
         n_beyond = flag.get("n_beyond", 0)
         min_g = flag.get("min_g_hat", float("nan"))
         t_max = flag.get("t_max_train", float("nan"))
@@ -816,11 +901,7 @@ class LimitationsSection(BaseSection):
         n_g_events = flag.get("n_g_events")
         n_g_censored = flag.get("n_g_censored")
         floor = flag.get("min_ipcw_support", 10)
-        composition_thin = (
-            n_g_events is not None
-            and n_g_censored is not None
-            and min(n_g_events, n_g_censored) < floor
-        )
+        composition_thin = _ipcw_composition_thin(flag)
 
         detected_parts = []
         if n_beyond > 0:
@@ -847,48 +928,17 @@ class LimitationsSection(BaseSection):
 
         tau_str = f"{tau:.1f}" if isinstance(tau, (int, float)) and tau is not None else "None (unbounded)"
 
-        composition_why = (
-            " Separately, when the G_hat-fitting cohort has too few events or "
-            "too few censored observations, the censoring distribution cannot "
-            "be estimated at all: G_hat stays flat near 1.0, the IPCW weights "
-            "collapse to 1, and Uno's C-index, AUC(t), Brier, and IBS silently "
-            "reduce to their unweighted forms (no NaN, no censoring correction)."
-            if composition_thin else ""
-        )
-        composition_action = (
-            " Because the G_hat-fitting cohort is too thin to estimate the "
-            "censoring distribution, the IPCW correction is effectively off — "
-            "read these IPCW rows as their unweighted counterparts, prefer "
-            "Harrell/Antolini, and verify the cohort composition reflects true "
-            "follow-up rather than dropped or missing survivors."
-            if composition_thin else ""
-        )
-
         return {
             "detected": detected,
             "why": (
-                "Every IPCW-weighted metric (Uno's C-index, AUC(t), Brier, IBS) "
-                "reweights each test observation by 1/G_hat(t) (or 1/G_hat(t)^2 for "
-                "Uno's C-index), where G_hat is the Kaplan-Meier of the "
-                f"{g_label} censoring distribution. Beyond that follow-up "
-                "(or where G_hat is very small), these weights explode and a "
-                "handful of late-time observations dominate both the point estimate "
-                "and the bootstrap CI width, producing numbers that no longer behave "
-                "like bias-corrected discrimination/calibration estimates."
-                + composition_why
+                _IPCW_WHY.format(g_label=g_label)
+                + (_IPCW_COMPOSITION_WHY if composition_thin else "")
             ),
             "action": (
                 f"All IPCW-weighted rows in the evaluation table (Uno's C-index, "
                 f"AUC(t), Brier, IBS) use tau={tau_str} with the {g_label} G_hat. "
-                "Compare Uno's IPCW against Harrell/Antolini before drawing "
-                "conclusions about discrimination, and prefer Harrell/Antolini "
-                "when their CIs are much tighter. Brier, IBS, and AUC(t) lack "
-                "non-IPCW counterparts, so widened bootstrap CIs (relative to the "
-                "Harrell/Antolini gap) are themselves the symptom — interpret those "
-                "metrics with caution. Pass ipcw_tau=<float> to evaluate()/bootstrap() "
-                "to override the default, or ipcw_tau=None to disable truncation "
-                "(legacy behavior)."
-                + composition_action
+                + _IPCW_ADVICE
+                + (_IPCW_COMPOSITION_ACTION if composition_thin else "")
             ),
             "detail": (
                 f"n_beyond={n_beyond}, min_G={min_g:.3f}, tau={tau_str}, "

@@ -314,7 +314,7 @@ def test_validate_defaults_to_test_g_hat():
         warnings.simplefilter("ignore")
         learner.validate(X_val, y_val, name="ext", n_bootstrap=4, verbose=False,
                          show_progress=False)
-    flag = learner._state.ipcw_support_flag
+    flag = learner._state.ipcw_support_flags.get("ext")
     # Either no violation (because G is well-defined on its own cohort) OR
     # a g_hat_floor violation only — but never the n_beyond branch with
     # g_source='train'. Whichever case, when the flag exists it must say 'test'.
@@ -335,10 +335,12 @@ def test_validate_explicit_train_source_reproduces_legacy():
             n_bootstrap=4, verbose=False, show_progress=False,
             ipcw_g_hat_source='train',
         )
-    flag = learner._state.ipcw_support_flag
+    flag = learner._state.ipcw_support_flags.get("ext_legacy")
     assert flag is not None
     assert flag.get('g_hat_source') == 'train'
     assert flag.get('n_beyond', 0) > 0
+    # An external cohort never overwrites the test-set flag.
+    assert learner._state.ipcw_support_flag is None
 
 
 @pytest.mark.integration
@@ -429,7 +431,7 @@ def test_composition_warning_follows_test_source_for_validate():
             if issubclass(w.category, MethodologicalWarning)]
     assert any("too few to estimate" in m for m in msgs), \
         f"Expected composition warning, got: {msgs}"
-    flag = learner._state.ipcw_support_flag
+    flag = learner._state.ipcw_support_flags.get("ext_thin")
     assert flag is not None
     assert flag.get('g_hat_source') == 'test'
     assert flag.get('n_g_censored') == 0
@@ -606,7 +608,7 @@ def test_report_caveat_names_g_source():
         learner.validate(X_val, y_val, name="ext", n_bootstrap=4,
                          verbose=False, show_progress=False)
 
-    flag = learner._state.ipcw_support_flag
+    flag = learner._state.ipcw_support_flags.get("ext")
     if flag is None:
         pytest.skip("This synthetic setup did not trigger a g_hat floor violation.")
 
@@ -615,6 +617,7 @@ def test_report_caveat_names_g_source():
     md = out["markdown"]
     assert "IPCW Training-Support Violation" in md
     assert "validation-cohort" in md
+    assert "Validation cohort ext" in md
 
 
 @pytest.mark.integration

@@ -1,6 +1,6 @@
 """TRIPOD+AI Checklist appendix for report generation.
 
-Cross-references all ~44 TRIPOD+AI items against the mlsurv report,
+Cross-references all 52 TRIPOD+AI items against the mlsurv report,
 showing which are auto-filled, which need researcher input, and where
 to find each piece of information.
 

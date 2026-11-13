@@ -1,7 +1,7 @@
 """SHAP (SHapley Additive exPlanations) visualizations."""
 
 import warnings
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -449,6 +449,7 @@ def plot_shap_beeswarm(
     height: Optional[int] = None,
     feature_groups: FeatureGroupsType = None,
     group_colors: Optional[Dict[str, str]] = None,
+    xlim: Optional[Tuple[float, float]] = None,
 ) -> go.Figure:
     """
     Beeswarm plot showing SHAP value distribution colored by feature value.
@@ -494,6 +495,11 @@ def plot_shap_beeswarm(
         Feature-to-group mapping. See :func:`resolve_feature_group_colors`.
     group_colors : dict, optional
         Explicit ``{group: color}`` overrides.
+    xlim : tuple of (float, float), optional
+        Display range for the SHAP axis as ``(xmin, xmax)``. Use it when a
+        few extreme values compress the rest of the plot. Points outside the
+        range are not drawn, so say so when reporting the figure. ``None``
+        (default) fits the range to the data.
 
     Returns
     -------
@@ -519,6 +525,10 @@ def plot_shap_beeswarm(
     if 'feature_value' not in shap_df.columns:
         required.append(sample_col)
     validate_columns(shap_df, required, "plot_shap_beeswarm")
+    if xlim is not None and (len(xlim) != 2 or not xlim[0] < xlim[1]):
+        raise ValueError(
+            f"xlim must be (xmin, xmax) with xmin < xmax; got {xlim!r}."
+        )
 
     top_features = _get_top_shap_features(shap_df, feature_col, shap_col, n)
     n_features = len(top_features)
@@ -645,6 +655,9 @@ def plot_shap_beeswarm(
              '<span style="color:#d62728">Increases Risk \u2192</span>',
         showarrow=False, font=dict(size=d["font_size_annotation"]),
     )
+
+    if xlim is not None:
+        fig.update_xaxes(range=list(xlim), row=main_row, col=main_col)
 
     apply_size_overrides(fig, width, height)
     return fig

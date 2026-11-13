@@ -134,6 +134,7 @@ SHAP (Shapley Additive Explanations)<sup>[4](#references)</sup> values decompose
 ```python
 learner.plot_shap('rsf', kind='importance')  # Global importance bar chart
 learner.plot_shap('rsf', kind='beeswarm')    # Per-sample values colored by feature value
+learner.plot_shap('rsf', kind='beeswarm', xlim=(-1.5, 1.0))  # Fixed SHAP-axis range
 ```
 
 SHAP values are computed on demand by the plotting calls above. To compute them standalone after `evaluate()` — without re-running the rest of the metric suite — call `importance(method='shap')`. It returns a global ranking (one row per feature) and stores the per-sample values on `result.evaluation.shap_values` as a side effect, so `plot_shap` and the beeswarm work afterward:
@@ -268,6 +269,19 @@ mlsurv provides 23 programmatic visualization methods, all rendered as interacti
 | `plot_feature_distributions` | Feature distributions for train and test sets |
 | `plot_missing` | Missing data heatmap |
 | `plot_optuna` | Optuna optimization history and parameter importance |
+
+### Customizing Figures
+
+Every plot method returns a Plotly `Figure`, so standard Plotly calls adjust it after the fact. For example, to set an axis range or resize a figure:
+
+```python
+fig = learner.plot_importance(style='bar')
+fig.update_xaxes(range=[0, 0.15])           # fix the x-axis range
+fig.update_layout(width=600, height=400)    # resize
+fig.write_image('importance.pdf')
+```
+
+Some plots also take an axis-range argument directly: `plot_survival(xlim=..., ylim=...)` and the SHAP beeswarm, `plot_shap(kind='beeswarm', xlim=(-1.5, 1.0))`. A few extreme SHAP values can compress the rest of a beeswarm; points outside `xlim` are not drawn, so note them when you report the figure.
 
 ## References
 

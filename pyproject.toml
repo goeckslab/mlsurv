@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mlsurv"
-version = "0.2.0"
+version = "0.3.0"
 description = "Low-code machine learning package for survival analysis"
 readme = "README.md"
 license = "MIT"
@@ -39,8 +39,6 @@ dependencies = [
     "xgboost>=1.6.0",
     "openpyxl>=3.0.0",
     "shap>=0.42.0",
-    "jupyter>=1.0.0",
-    "ipykernel>=6.0.0",
 ]
 
 [project.optional-dependencies]
@@ -59,11 +57,19 @@ postgres = [
 completion = [
     "argcomplete>=2.0.0",
 ]
+# Running the tutorial vignettes (Jupyter notebooks).
+notebooks = [
+    "jupyter>=1.0.0",
+    "ipykernel>=6.0.0",
+]
 dev = [
     "pytest>=7.0.0",
     "pytest-cov>=4.0.0",
     "pytest-timeout>=2.1.0",
     "argcomplete>=2.0.0",
+    # The vignette tests execute the notebooks.
+    "jupyter>=1.0.0",
+    "ipykernel>=6.0.0",
 ]
 
 [project.scripts]

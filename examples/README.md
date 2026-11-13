@@ -54,7 +54,11 @@ jupyter nbconvert --to notebook --execute examples/vignette_01_quickstart.ipynb
 - optuna
 - plotly
 - shap
-- jupyter
+
+**Jupyter** (to open and run the notebooks):
+```bash
+pip install "mlsurv[notebooks]"
+```
 
 **Optional** (vignette 03 only — DeepSurv/DeepHit benchmarks need PyTorch + pycox):
 ```bash
